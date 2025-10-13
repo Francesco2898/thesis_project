@@ -65,6 +65,7 @@ class ThesisProjectEnv(DirectRLEnv):
         print(self.robot.cfg.actuators)
         # target position in local coordinates
         self.target_pos = torch.tensor([[0.5, 0.5, 0.5]], device=self.device).repeat(self.num_envs, 1)
+        self.target_rot = torch.zeros((self.num_envs, 4), device=self.device)
 
         target_obj_cfg = RigidObjectCfg(
             prim_path="/World/envs/env_.*/TargetObject",
@@ -72,7 +73,7 @@ class ThesisProjectEnv(DirectRLEnv):
                 radius=0.03,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=True),
                 mass_props=sim_utils.MassPropertiesCfg(mass=0.1),
-                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0))
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
@@ -94,13 +95,13 @@ class ThesisProjectEnv(DirectRLEnv):
             }
         )
         self.target_marker = VisualizationMarkers(target_marker_cfg)
+        # add articulation to scene
+        self.scene.articulations["robot"] = self.robot
+        self.scene.rigid_objects["target"] = self.target_obj
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
-        # add articulation to scene
-        self.scene.articulations["robot"] = self.robot
-        self.scene.rigid_objects["target"] = self.target_obj
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -131,26 +132,33 @@ class ThesisProjectEnv(DirectRLEnv):
         # end effector state
         ee_pos = self.robot.data.body_pos_w[:, self.hand_link_idx] # world coordinates
         ee_pos_local = self.get_env_local_pos(self.scene.env_origins, ee_pos) # local coordinates
+        ee_pose = self.robot.data.body_quat_w[:, self.hand_link_idx]
         ee_vel = self.robot.data.body_lin_vel_w[:, self.hand_link_idx] # velocity
         ee_ang = self.robot.data.body_ang_vel_w[:, self.hand_link_idx] # angular velocity
 
         # joint state
         joint_pos = self.robot.data.joint_pos
         joint_vel = self.robot.data.joint_vel
-
         joint_pos_norm = 2.0 * (joint_pos - self.robot_dof_lower_limit)/(self.robot_dof_upper_limit - self.robot_dof_lower_limit) - 1.0
         joint_vel_norm = joint_vel * self.cfg.dof_velocity_scale
 
         # target state
         targ_vec = self.target_pos - ee_pos_local # vector distance from the ee
-        targ_dist = torch.norm(targ_vec, dim=-1)
+        # --- quaternion hygiene: normalizza + canonalizza emisfero ---
+        # ee_quat_w = ee_quat_w / (ee_quat_w.norm(dim=-1, keepdim=True) + 1e-8)
+        # tgt_quat_w = tgt_quat_w / (tgt_quat_w.norm(dim=-1, keepdim=True) + 1e-8)
+        # same_hemi = ((ee_quat_w * tgt_quat_w).sum(dim=-1, keepdim=True) >= 0)
+        # ee_quat_w = torch.where(same_hemi, ee_quat_w, -ee_quat_w)  # riduce discontinuità di segno
         # print("[DEBUG] target dist = ", targ_dist.mean().item())
+
         obs = torch.hstack((joint_pos_norm,
                             joint_vel_norm,
                             ee_pos_local,
+                            ee_pose,
                             ee_vel,
                             ee_ang,
                             targ_vec,
+                            self.target_rot,
                             self.target_pos
                             ))
         observations = {"policy": obs}
@@ -161,16 +169,23 @@ class ThesisProjectEnv(DirectRLEnv):
         ee_pos = self.robot.data.body_pos_w[:, self.hand_link_idx]
         # ee pos in local reference frame
         ee_pos_local = self.get_env_local_pos(self.scene.env_origins, ee_pos)
+        # ee_pose
+        ee_quat = self.robot.data.body_quat_w[:, self.hand_link_idx]
         # end effector velocity
         ee_vel = self.robot.data.body_lin_vel_w[:, self.hand_link_idx]
         ee_ang = self.robot.data.body_ang_vel_w[:, self.hand_link_idx]
         # target 
         targ_dist = torch.norm(self.target_pos - ee_pos_local, p=2, dim=-1)
+        targ_quat = self.target_rot
+
+        # quaternions normaliozation
+        ee_quat = ee_quat / (ee_quat.norm(dim=-1, keepdim=True) + 1e-8)
+        targ_quat = targ_quat / (targ_quat.norm(dim=-1, keepdim=True) + 1e-8)
         # close = targ_dist < 0.05
         # next_buf = torch.where(close, self.success_steps_buf+1, torch.zeros_like(self.success_steps_buf))
         # just_succeeded = (next_buf == 5)
         # reward_success = just_succeeded.float() * 10.0
-        total_reward = self.compute_rewards(targ_dist)
+        total_reward = self.compute_rewards(self.actions, targ_dist, ee_quat, targ_quat)
         self.global_step += 1  # aggiorna il contatore step
         if self.global_step % 100 == 0:
             # print("[DEBUG] Logging step:", self.global_step)
@@ -204,7 +219,6 @@ class ThesisProjectEnv(DirectRLEnv):
         # rtesetting the steps close buffer
         self.close_steps_buf[env_ids] = 0
 
-
         # robot state
         joint_pos = self.robot.data.default_joint_pos[env_ids] + sample_uniform(
             -0.125,
@@ -221,12 +235,13 @@ class ThesisProjectEnv(DirectRLEnv):
         # local position wrt the env
         new_target_pos_local = sample_uniform(self.box_min, self.box_max, (len(env_ids), 3), device=self.device)
         self.target_pos[env_ids] = new_target_pos_local
+        self.target_rot[env_ids] = self.random_quat_uniform(len(env_ids))
 
         new_target_pos_world = new_target_pos_local + self.scene.env_origins[env_ids]
         targ_state = torch.cat((
             new_target_pos_world,
+            self.target_rot[env_ids],
             torch.zeros((len(env_ids),  3), device=self.device), # null linear velocity
-            torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=self.device).repeat(len(env_ids), 1),
             torch.zeros((len(env_ids),  3), device=self.device) # null angular velocity
         ), dim=-1)
         # print("[DEBUG] env_ids:", env_ids)
@@ -247,19 +262,24 @@ class ThesisProjectEnv(DirectRLEnv):
             qw, qx, qy, qz = world_quat.unbind(-1)
             return torch.stack([local_pose[:, 0], local_pose[:, 1], local_pose[:, 2], qw, qx, qy, qz],dim=-1)
         
-    def compute_rewards(self, targ_dist: torch.Tensor):
+    def compute_rewards(self, actions, targ_dist: torch.Tensor, ee_quat: torch.Tensor, targ_quat: torch.Tensor):
         # reward based on the distance from the target
         # r_dist = 1.0 - torch.tanh(targ_dist)
-        r_dist = 1.0 / (1.0 + targ_dist**2)
-        r_dist *= r_dist
-        r_dist = torch.where(targ_dist < 0.02, r_dist*2, r_dist)
+        reward_dist = 1.0 / (1.0 + targ_dist**2)
+        reward_dist *= reward_dist
+        reward_dist = torch.where(targ_dist < 0.02, reward_dist*2, reward_dist)
 
         # distance improvement
         if not hasattr(self, "prev_targ_dist"):
             self.prev_targ_dist = targ_dist.clone()
         improvement = torch.clamp(self.prev_targ_dist - targ_dist, min=0.0)
-        r_progress = 0.8 * improvement
+        reward_progress = 0.8 * improvement
         self.prev_targ_dist = targ_dist.detach()
+
+        # pose reward
+        dot_prod = (ee_quat * targ_quat).sum(dim=-1).abs().clamp(0.0, 1.0 - 1e-6)
+        allignement_reward = dot_prod * dot_prod
+        allignement_reward = self.cfg.allignemet_scale * allignement_reward
 
         # # success reward
         # self.close_steps_buf = torch.where(
@@ -272,8 +292,28 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # limits = (self.effort_limits + 1e-8)
         # pen_effect = 1e-4 * torch.sum((self.robot_effort_targets/limits)**2, dim=-1)
-        reward = r_dist + r_progress
+
+        # actions pensalty
+        penalty_action = torch.sum(actions**2, dim=-1)
+        penalty_action = self.cfg.action_penalty_scale * penalty_action
+        reward = reward_dist + reward_progress - penalty_action + allignement_reward
         return reward
+    
+    def random_quat_uniform(self, n: int) -> torch.Tensor:
+        u1 = torch.rand(n, device=self.device)
+        u2 = torch.rand(n, device=self.device)
+        u3 = torch.rand(n, device=self.device)
+
+        sqrt1_u1 = torch.sqrt(1.0 - u1)
+        sqrt_u1  = torch.sqrt(u1)
+    
+        qx = sqrt1_u1 * torch.sin(2.0 * math.pi * u2)
+        qy = sqrt1_u1 * torch.cos(2.0 * math.pi * u2)
+        qz = sqrt_u1  * torch.sin(2.0 * math.pi * u3)
+        qw = sqrt_u1  * torch.cos(2.0 * math.pi * u3)
+    
+        q = torch.stack((qw, qx, qy, qz), dim=-1)
+        return q
     
     # def compute_rewards(self, targ_dist: torch.Tensor):
     #     # reward based on the distance from the target

@@ -35,7 +35,7 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10
     # - space definition
     action_space = 9
-    observation_space = 33
+    observation_space = 41
     state_space = 0
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/60, render_interval=decimation)
@@ -50,3 +50,5 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     
     action_scale = 0.8
     dof_velocity_scale = 0.1
+    action_penalty_scale = 0.01
+    allignemet_scale = 0.1
