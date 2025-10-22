@@ -35,7 +35,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.actions = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)   
 
         self.success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.prev_targ_dist = torch.full((self.num_envs), float("inf"), device=self.device)
+        self.prev_targ_dist = torch.full((self.num_envs,), float("inf"), device=self.device)
                 # SummaryWriter per TensorBoard
         self.writer = SummaryWriter(log_dir="runs/my_run")
         self.global_step = 0  # contatore manuale degli step
@@ -50,7 +50,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.gripper_fwd_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.gripper_up_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device)
         self.object_up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
-        self.object_inward_axis = torch.Tensor([-1.0, 0.0, 0.0], device=self.device)
+        self.object_inward_axis = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
 
         self.gripper_state = torch.ones((self.num_envs), device=self.device) # 1 = open, 0 = closed
         self.robot_local_grasp_pos = (self.gripper_fwd_axis * 0.04).expand(self.num_envs, 3).clone()
@@ -105,7 +105,7 @@ class ThesisProjectEnv(DirectRLEnv):
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
                 pos=(0.5, 0.5, 0.021),
-                rot=(0.0, 0.0, 0.0, 1.0)
+                rot=(1.0, 0.0, 0.0, 0.0)
             ),
             debug_vis=True
         )
@@ -175,6 +175,7 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # orientation error
         q_hand = self.robot_grasp_rot
+        # print("[DBG] q_hand shape:", tuple(q_hand.shape), " last_dim:", q_hand.shape[-1])
         q_hand = q_hand/(q_hand.norm(dim=-1, keepdim=True) + 1e-8)
         q_targ = self.object_grasp_rot_w
         q_targ = q_targ/(q_targ.norm(dim=-1, keepdim=True) + 1e-8)
@@ -207,7 +208,8 @@ class ThesisProjectEnv(DirectRLEnv):
                             to_target,
                             ori_err,
                             ))
-        observations = {"policy": obs}
+        obs = torch.nan_to_num(obs, nan=0, posinf=1e6, neginf=-1e6)
+        observations = {"policy": torch.clamp(obs, -5.0, 5.0)}
         return observations 
 
     def _get_rewards(self) -> torch.Tensor:
@@ -233,7 +235,7 @@ class ThesisProjectEnv(DirectRLEnv):
         # next_buf = torch.where(close, self.success_steps_buf+1, torch.zeros_like(self.success_steps_buf))
         # just_succeeded = (next_buf == 5)
         # reward_success = just_succeeded.float() * 10.0
-        total_reward = self.compute_rewards(self.actions, targ_dist, grasp_quat_w, targ_quat_w)
+        total_reward = self.compute_rewards(self.actions, targ_dist, lf_pos_w, rf_pos_w)
         self.global_step += 1  # aggiorna il contatore step
         # if self.global_step % 100 == 0:
         #     # print("[DEBUG] Logging step:", self.global_step)
@@ -245,27 +247,16 @@ class ThesisProjectEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
 
-        terminated = self.close_steps_buf >= 5
+        success_lift = 0.10
+        d = self.target_obj.data.root_pos_w[:, 2] - self.object_init_z
+        terminated = d > success_lift
         truncated = self.episode_length_buf >= self.max_episode_length - 1
-        # if torch.any(success):
-        #     print(f"[DEBUG] Success envs:", torch.nonzero(success).squeeze(-1).cpu().numpy())
-        # if torch.any(time_out):
-        #     print(f"[DEBUG] Time-out envs:", torch.nonzero(time_out).squeeze(-1).cpu().numpy())
-        # in _get_dones, subito prima di restituire:
-        # if not hasattr(self, "success_rate_buf"):
-        #     self.success_rate_buf = torch.zeros(self.num_envs, device=self.device)
-        # self.success_rate_buf = success.float()  # 1 se ha avuto successo in questo step
-        # # poi nel tuo loop di training logga success_rate_buf.mean().item() come "Metrics/success_rate"
-        # self.extras["success_rate"] = self.success_rate_buf.mean().item()
         return terminated, truncated
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         if env_ids is None:
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
-
-        # rtesetting the steps close buffer
-        self.close_steps_buf[env_ids] = 0
 
         # robot state
         joint_pos = self.robot.data.default_joint_pos[env_ids] + sample_uniform(
@@ -283,12 +274,13 @@ class ThesisProjectEnv(DirectRLEnv):
         # local position wrt the env
         new_target_pos_local = sample_uniform(self.box_min, self.box_max, (len(env_ids), 3), device=self.device)
         self.target_pos[env_ids] = new_target_pos_local
-        self.target_rot[env_ids] = self.random_quat_uniform(len(env_ids))
+        # self.target_rot[env_ids] = self.random_quat_uniform(len(env_ids))
 
-        new_target_pos_world = new_target_pos_local + self.scene.env_origins[env_ids]
+        new_target_pos_w = new_target_pos_local + self.scene.env_origins[env_ids]
+        new_object_rot_w = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
         targ_state = torch.cat((
-            new_target_pos_world,
-            self.target_rot[env_ids],
+            new_target_pos_w,
+            new_object_rot_w,
             torch.zeros((len(env_ids),  3), device=self.device), # null linear velocity
             torch.zeros((len(env_ids),  3), device=self.device) # null angular velocity
         ), dim=-1)
@@ -297,7 +289,10 @@ class ThesisProjectEnv(DirectRLEnv):
         # print("[DEBUG] targ_state:", targ_state)
         self.target_obj.write_root_state_to_sim(targ_state, env_ids)
         self.object_init_z[env_ids] = self.target_obj.data.root_pos_w[env_ids, 2]
-        # self.target_marker.visualize((self.target_pos + self.scene.env_origins).cpu())
+        self.compute_intermediete_values()
+        prev_dist_0 = torch.norm(self.object_grasp_pos_w[env_ids] - self.robot_grasp_pos[env_ids])
+        self.prev_targ_dist[env_ids] = prev_dist_0
+        # self.target_marker.visua lize((self.target_pos + self.scene.env_origins).cpu())
         # print("[DEBUG] target_obj root state shape:", self.target_obj.data.root_state_w.shape)
         # print("[DEBUG] target pos world: ", self.scene.env_origins + self.target_pos[env_ids])
         # print("[DEBUG] sim root state:", self.target_obj.data.root_state_w[:, :3])
@@ -311,19 +306,25 @@ class ThesisProjectEnv(DirectRLEnv):
             qw, qx, qy, qz = world_quat.unbind(-1)
             return torch.stack([local_pose[:, 0], local_pose[:, 1], local_pose[:, 2], qw, qx, qy, qz],dim=-1)
         
-    def compute_rewards(self, actions, targ_dist: torch.Tensor, ee_quat: torch.Tensor, targ_quat: torch.Tensor):
+    def compute_rewards(self, actions,
+                        targ_dist: torch.Tensor,
+                        robot_lf_pos: torch.Tensor,
+                        robot_rf_pos: torch.Tensor,
+                        ):
         # reward based on the distance from the target
         reward_dist = 1.0 / (1.0 + targ_dist**2)
         reward_dist *= reward_dist
         reward_dist = torch.where(targ_dist < 0.02, reward_dist*2, reward_dist)
 
         # distance improvement
-        if not hasattr(self, "prev_targ_dist"):
-            self.prev_targ_dist = targ_dist.clone()
-        improvement = torch.clamp(self.prev_targ_dist - targ_dist, min=0.0)
-        reward_progress = 0.8 * improvement
-        self.prev_targ_dist = targ_dist.detach()
+        # if not hasattr(self, "prev_targ_dist"):
+        #     self.prev_targ_dist = targ_dist.clone()
+        # improvement = torch.clamp(self.prev_targ_dist - targ_dist, min=0.0)
+        # reward_progress = 0.8 * improvement
+        # self.prev_targ_dist = targ_dist.detach()
 
+        # gating coefficient near the target
+        w_near = torch.clamp(1.0 - targ_dist/0.1, 0.0, 1.0)
         # orientation reward
         fwd_axis = self.gripper_fwd_axis.expand(self.num_envs, -1)
         gripper_up_axis = self.gripper_up_axis.expand(self.num_envs, -1)
@@ -339,29 +340,32 @@ class ThesisProjectEnv(DirectRLEnv):
         dot2 = (axis2 * axis4).sum(dim=-1).clamp(-1.0, 1.0)
 
         rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
-        reward_rot = self.cfg.rot_reward_scale * rot_term
+        reward_rot = w_near * self.cfg.rot_reward_scale * rot_term
 
         # lift reward
         z = self.target_obj.data.root_pos_w[:, 2]
         lift = torch.clamp(z - self.object_init_z, min=0.0)
         reward_lift = lift * self.cfg.lift_reward_scale
 
-                # actions pensalty
+        # finger grasp reward
+        lfinger_dist = robot_lf_pos[:, 1] - self.object_grasp_pos_w[:, 1]
+        rfinger_dist = self.object_grasp_pos_w[:, 1] - robot_rf_pos[:, 1]
+        finger_dist_penalty = torch.zeros_like(lfinger_dist)
+        finger_dist_penalty += torch.where(lfinger_dist < 0, lfinger_dist, torch.zeros_like(lfinger_dist))
+        finger_dist_penalty += torch.where(rfinger_dist < 0, rfinger_dist, torch.zeros_like(rfinger_dist))
+        reward_finger = w_near * self.cfg.finger_reward_scale * finger_dist_penalty
+
+
+        # actions pensalty
         penalty_action = torch.sum(actions**2, dim=-1)
         penalty_action = self.cfg.action_penalty_scale * penalty_action
-        reward = reward_dist + reward_progress - penalty_action + reward_rot + reward_lift
 
-        # # success reward
-        # self.close_steps_buf = torch.where(
-        #     targ_dist < 0.05,
-        #     self.close_steps_buf + 1,
-        #     torch.zeros_like(self.close_steps_buf)
-        # )
-        # just_succeeded = (self.close_steps_buf == 5)
-        # r_success = just_succeeded.float() * 2.0
-
-        # limits = (self.effort_limits + 1e-8)
-        # pen_effect = 1e-4 * torch.sum((self.robot_effort_targets/limits)**2, dim=-1)
+        # compute reward
+        reward = (reward_dist
+                  - penalty_action 
+                  + reward_rot 
+                  + reward_lift
+                  + reward_finger)
 
         #reward for lifting the object
         reward = torch.where(lift > 0.01, reward + 0.25, reward)
@@ -417,12 +421,12 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_grasp_pos_w[env_ids] = obj_pos_w + og_offset_world
         self.object_grasp_rot_w[env_ids] = obj_quat_w
 
-    def quat_conjugate(q: torch.Tensor):
+    def quat_conjugate(self, q: torch.Tensor):
         w, x, y, z = q.unbind(-1)
-        q_conj = torch.hstack((w, -x, -y, -z), dim = -1)
+        q_conj = torch.stack((w, -x, -y, -z), dim=-1)
         return q_conj
     
-    def quat_mul(q1: torch.Tensor, q2: torch.Tensor):  # ([...,4] * [...,4]) -> [...,4], conv. [w,x,y,z]
+    def quat_mul(self, q1: torch.Tensor, q2: torch.Tensor):  # ([...,4] * [...,4]) -> [...,4], conv. [w,x,y,z]
         w1,x1,y1,z1 = q1.unbind(-1)
         w2,x2,y2,z2 = q2.unbind(-1)
         w = w1*w2 - x1*x2 - y1*y2 - z1*z2
