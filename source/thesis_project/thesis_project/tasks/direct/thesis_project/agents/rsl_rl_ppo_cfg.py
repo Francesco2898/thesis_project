@@ -10,9 +10,9 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 32
-    max_iterations = 1500
-    save_interval = 50
+    num_steps_per_env = 64
+    max_iterations = 2000
+    save_interval = 100
     experiment_name = "cartpole_direct"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(

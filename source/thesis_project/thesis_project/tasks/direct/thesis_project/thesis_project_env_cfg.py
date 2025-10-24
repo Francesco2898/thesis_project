@@ -44,13 +44,13 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     # robot_cfg.init_state.pos = (0.0, 0.0, 1.05)
     # robot_cfg.init_state.rot = (0.0, 0.0, 0.0, 1.0)
     #scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=4, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=32, env_spacing=4, replicate_physics=True)
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
-    action_scale = 7.5
+    action_scale = 4.0
     dof_velocity_scale = 0.1
     action_penalty_scale = 0.01
     rot_reward_scale = 0.5
-    lift_reward_scale = 0.5
+    lift_reward_scale = 1.5
     finger_reward_scale = 0.5

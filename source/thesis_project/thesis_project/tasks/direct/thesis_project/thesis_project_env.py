@@ -324,7 +324,8 @@ class ThesisProjectEnv(DirectRLEnv):
         # self.prev_targ_dist = targ_dist.detach()
 
         # gating coefficient near the target
-        w_near = torch.clamp(1.0 - targ_dist/0.1, 0.0, 1.0)
+        # w_near = torch.clamp(1.0 - targ_dist/0.1, 0.0, 1.0)
+        w_near = torch.where(targ_dist < 0.2, 1.0, 0.0)
         # orientation reward
         fwd_axis = self.gripper_fwd_axis.expand(self.num_envs, -1)
         gripper_up_axis = self.gripper_up_axis.expand(self.num_envs, -1)
