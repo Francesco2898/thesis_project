@@ -35,7 +35,7 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10
     # - space definition
     action_space = 9
-    observation_space = 24
+    observation_space = 25
     state_space = 0
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/60, render_interval=decimation)
@@ -48,9 +48,9 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
-    action_scale = 4.0
+    action_scale = 2.0
     dof_velocity_scale = 0.1
     action_penalty_scale = 0.01
     rot_reward_scale = 0.5
     lift_reward_scale = 1.5
-    finger_reward_scale = 0.5
+    finger_reward_scale = 0.8
