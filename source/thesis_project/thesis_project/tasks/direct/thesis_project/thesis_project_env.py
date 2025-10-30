@@ -8,7 +8,6 @@ from __future__ import annotations
 import math
 import torch
 from collections.abc import Sequence
-from pxr import UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
@@ -74,8 +73,8 @@ class ThesisProjectEnv(DirectRLEnv):
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
         self.robot_dof_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
         self.robot_dof_speed_scales = torch.ones_like(self.robot_dof_lower_limit)
-        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint1")[0]] = 0.3
-        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint2")[0]] = 0.3
+        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint1")[0]] = 1.0
+        self.robot_dof_speed_scales[self.robot.find_joints("panda_finger_joint2")[0]] = 1.0
 
         # target auxiliary variables
         # sample of the new target in a box space
@@ -193,13 +192,13 @@ class ThesisProjectEnv(DirectRLEnv):
         ori_err = torch.where(nv > 1e-6, angle * (qv / nv), 2.0 * qv)
         ori_err = torch.clamp(ori_err/math.pi, -1.0, 1.0)
 
-        # fingers aperture
-        q_f     = self.robot.data.joint_pos[:, self.finger_joints_ids]     # (N,2)
-        q_hi = self.robot_dof_upper_limit[self.finger_joints_ids]
-        q_lw = self.robot_dof_lower_limit[self.finger_joints_ids]
-        q_norm = (q_f - q_lw)/(q_hi - q_lw + 1e-8)
-        aperture = q_norm.mean(dim=-1, keepdim=True)
-        aperture_centered = 2.0 * aperture - 1.0
+        # # fingers aperture
+        # q_f     = self.robot.data.joint_pos[:, self.finger_joints_ids]     # (N,2)
+        # q_hi = self.robot_dof_upper_limit[self.finger_joints_ids]
+        # q_lw = self.robot_dof_lower_limit[self.finger_joints_ids]
+        # q_norm = (q_f - q_lw)/(q_hi - q_lw + 1e-8)
+        # aperture = q_norm.mean(dim=-1, keepdim=True)
+        # aperture_centered = 2.0 * aperture - 1.0
 
         # joint state
         joint_pos = self.robot.data.joint_pos
@@ -217,7 +216,6 @@ class ThesisProjectEnv(DirectRLEnv):
                             joint_vel_norm,
                             to_target,
                             ori_err,
-                            aperture_centered
                             ))
         obs = torch.nan_to_num(obs, nan=0, posinf=1e6, neginf=-1e6)
         observations = {"policy": torch.clamp(obs, -5.0, 5.0)}
@@ -336,7 +334,10 @@ class ThesisProjectEnv(DirectRLEnv):
         # self.prev_targ_dist = targ_dist.detach()
 
         # gating coefficient near the target
-        w_near = torch.clamp(1.0 - targ_dist/0.2, 0.0, 1.0)
+        r_soft  = 0.30  # inizia a contare un po’ già a 30 cm
+        r_close = 0.12  # “conteggio pieno” sotto 12 cm
+        w_rot = torch.clamp((r_soft - targ_dist)/(r_soft - r_close + 1e-8), 0.0, 1.0) # w_rot -> starts to allign relatively close to the target
+        w_near = torch.clamp(1.0 - targ_dist/0.2, 0.0, 1.0) # w_near -> starts to matter really close (finger related)
         # w_near = torch.where(targ_dist < 0.2, 1.0, 0.0)
 
         # orientation reward
@@ -354,7 +355,7 @@ class ThesisProjectEnv(DirectRLEnv):
         dot2 = (axis2 * axis4).sum(dim=-1).clamp(-1.0, 1.0)
 
         rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
-        reward_rot = w_near * self.cfg.rot_reward_scale * rot_term
+        reward_rot = w_rot * self.cfg.rot_reward_scale * rot_term
 
         # lift reward
         z = self.target_obj.data.root_pos_w[:, 2]
@@ -385,13 +386,11 @@ class ThesisProjectEnv(DirectRLEnv):
         closed_frac = 1.0 - q_norm.mean(dim=-1)
         near_contact = ((errL < 2*self.pad) & (errR < 2*self.pad)).float()
         close_hint = near_contact * closed_frac
+        wrong_side = ((dL > 0.0) | (dR < 0.0)).float()
 
         reward_finger = self.cfg.finger_reward_scale * w_near * (
             0.5 * pos_reward + 0.25 * gap_reward + 0.25 * sym_reward + 0.6 * close_hint
-            )
-        
-        wrong_side = ((dL > 0.0) | (dR < 0.0)).float()
-        reward_finger = reward_finger - w_near * self.cfg.finger_reward_scale * 0.2 * wrong_side
+            - 0.2 * wrong_side)
 
         # lfinger_dist = robot_lf_pos[:, 1] - self.object_grasp_pos_w[:, 1]
         # rfinger_dist = self.object_grasp_pos_w[:, 1] - robot_rf_pos[:, 1]
@@ -407,10 +406,10 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # compute reward
         reward = (reward_dist
-                  - penalty_action 
                   + reward_rot 
                   + reward_lift
-                  + reward_finger)
+                  + reward_finger
+                  - penalty_action )
 
         #reward for lifting the object
         reward = torch.where(lift > 0.01, reward + 0.25, reward)
