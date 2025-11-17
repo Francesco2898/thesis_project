@@ -46,19 +46,20 @@ class ThesisProjectEnv(DirectRLEnv):
         self.robot_dof_upper_limit = self.robot.data.soft_joint_pos_limits[0, :, 1].to(device = self.device)
         self.robot_effort_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
 
-        self.ee_offset = 0.04
+        self.ee_offset = 0.03
         self.gripper_fwd_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.gripper_up_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device)
         self.gripper_close_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device)
         self.object_up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.object_inward_axis = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
 
+        self.cube_half = 0.02
         self.gripper_state = torch.ones((self.num_envs), device=self.device) # 1 = open, 0 = closed
         self.gap_finger = torch.zeros((self.num_envs, 1), device=self.device)
         # self.robot_local_grasp_pos = (self.gripper_fwd_axis * 0.1).expand(self.num_envs, 3).clone()
         self.robot_local_grasp_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.robot_local_grasp_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 4).clone()
-        self.object_local_grasp_pos = torch.tensor([0.0, 0.0, 0.01], device=self.device).expand(self.num_envs, 3).clone()
+        self.object_local_grasp_pos = torch.tensor([0.0, 0.0, self.cube_half], device=self.device).expand(self.num_envs, 3).clone()
         self.object_local_grasp_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 4).clone()
 
         # robot link idxs
@@ -84,8 +85,11 @@ class ThesisProjectEnv(DirectRLEnv):
         self.box_min = torch.tensor([-0.5, -0.5, 0.021], device=self.device)
         self.box_max = torch.tensor([0.5, 0.5, 0.021], device=self.device)
         self.object_init_z = torch.zeros(self.num_envs, device=self.device)
-        self.cube_half = 0.02
-        self.pad = 0.005
+        self.r_in, self.r_out = 0.025, 0.05
+        self.near_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ori_th = 0.75
+        self.ori_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.success_height = 0.1
 
         # place position
         self.place_pos_local = torch.zeros((self.num_envs, 3), device=self.device)
@@ -127,6 +131,7 @@ class ThesisProjectEnv(DirectRLEnv):
             }
         )
         self.ee_marker = VisualizationMarkers(target_marker_cfg)
+        self.object_marker = VisualizationMarkers(target_marker_cfg)
         # add articulation to scene
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["target"] = self.target_obj
@@ -142,14 +147,20 @@ class ThesisProjectEnv(DirectRLEnv):
         self.actions = actions.clone().clamp(-1.0, 1.0)
 
         arm_actions = self.actions[..., :-2]
-        # gripper_cmd = self.actions[..., -2:].mean(dim=-1, keepdim=True)
-        gripper_cmd = self.actions[..., -2:-1].clamp(-1.0, 1.0)
-        gripper_cmd = gripper_cmd.expand(-1, 2)
         # arm section action
         targets_arm = self.robot_dof_targets[..., :-2] + self.robot_dof_speed_scales[:-2] * self.dt * arm_actions * self.cfg.action_scale
         self.robot_dof_targets[..., :-2] = torch.clamp(targets_arm, self.robot_dof_lower_limit[:-2], self.robot_dof_upper_limit[:-2])
+
+        # gripper_cmd = self.actions[..., -2:].mean(dim=-1, keepdim=True)
+        gripper_cmd = self.actions[..., -2:-1].clamp(-1.0, 1.0)
+        gripper_cmd = gripper_cmd.expand(-1, 2)
+        OPEN = 1.0
+        CLOSE = -1.0
+        grasp_phase_ok = (self.near_gate & self.ori_gate)
+        mask = grasp_phase_ok.unsqueeze(-1).expand(-1, 2)
+        cmd = torch.where(mask, torch.full_like(gripper_cmd, CLOSE), torch.full_like(gripper_cmd, OPEN))
         # fingers section action
-        targets_gripper = self.robot_dof_targets[..., self.finger_joints_ids] + self.robot_dof_speed_scales[self.finger_joints_ids] * self.dt * gripper_cmd * self.cfg.action_scale
+        targets_gripper = self.robot_dof_targets[..., self.finger_joints_ids] + self.robot_dof_speed_scales[self.finger_joints_ids] * self.dt * cmd * self.cfg.action_scale
         self.robot_dof_targets[..., self.finger_joints_ids] = torch.clamp(targets_gripper, self.robot_dof_lower_limit[self.finger_joints_ids], self.robot_dof_upper_limit[self.finger_joints_ids])
 
     def _apply_action(self) -> None:
@@ -164,10 +175,6 @@ class ThesisProjectEnv(DirectRLEnv):
     def _get_observations(self) -> dict:
 
         self.compute_intermediate_values()
-        # # end effector state
-        gap_des = 2.0 * (self.cube_half)
-        gap_err = (self.gap_finger - gap_des) / gap_des
-        gap_err = gap_err.clamp(-1.0, 1.0)
 
         robot_grasp_pos_w = self.robot_grasp_pos
         object_grasp_pos_w = self.object_grasp_pos_w
@@ -191,6 +198,11 @@ class ThesisProjectEnv(DirectRLEnv):
         ori_err = torch.where(nv > 1e-6, angle * (qv / nv), 2.0 * qv)
         ori_err = torch.clamp(ori_err/math.pi, -1.0, 1.0)
 
+        # lift state
+        z = self.target_obj.data.root_pos_w[:, 2]
+        lift = torch.clamp((z - self.object_init_z), min=0.0, max=self.success_height)
+        lift_height = (lift/self.success_height).unsqueeze(-1)
+
         # joint state
         joint_pos = self.robot.data.joint_pos
         joint_vel = self.robot.data.joint_vel
@@ -201,7 +213,7 @@ class ThesisProjectEnv(DirectRLEnv):
                             joint_vel_norm,
                             to_target,
                             ori_err,
-                            gap_err
+                            lift_height
                             ))
         obs = torch.nan_to_num(obs, nan=0, posinf=1e6, neginf=-1e6)
         observations = {"policy": torch.clamp(obs, -5.0, 5.0)}
@@ -221,31 +233,20 @@ class ThesisProjectEnv(DirectRLEnv):
         grasp_quat_w = self.robot.data.body_quat_w[:, self.hand_link_idx]
         ee_ang = self.robot.data.body_ang_vel_w[:, self.hand_link_idx] # angular velocity
         # target
-        targ_dist = torch.norm(self.object_grasp_pos_w - self.robot_grasp_pos, p=2, dim=-1)
+        to_target = self.object_grasp_pos_w - self.robot_grasp_pos
         targ_quat_w = self.target_obj.data.root_quat_w
 
         # quaternions normaliozation
         grasp_quat_w = grasp_quat_w / (grasp_quat_w.norm(dim=-1, keepdim=True) + 1e-8)
         targ_quat_w = targ_quat_w / (targ_quat_w.norm(dim=-1, keepdim=True) + 1e-8)
-        # close = targ_dist < 0.05
-        # next_buf = torch.where(close, self.success_steps_buf+1, torch.zeros_like(self.success_steps_buf))
-        # just_succeeded = (next_buf == 5)
-        # reward_success = just_succeeded.float() * 10.0
-        total_reward = self.compute_rewards(self.actions, targ_dist, lf_pos_w, rf_pos_w)
+
+        total_reward = self.compute_rewards(self.actions, to_target)
         self.global_step += 1  # aggiorna il contatore step
-        # if self.global_step % 100 == 0:
-        #     # print("[DEBUG] Logging step:", self.global_step)
-        #     self.writer.add_scalar("Metrics/reward_mean", total_reward.mean().item(), self.global_step)
-        #     self.writer.add_scalar("Metrics/target_dist_mean", targ_dist.mean().item(), self.global_step)
-        #     self.writer.add_scalar("Metrics/target_dist_min", targ_dist.min().item(), self.global_step)
-        #     self.writer.add_scalar("Metrics/target_dist_max", targ_dist.max().item(), self.global_step)
         return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-
-        success_lift = 0.10
         d = self.target_obj.data.root_pos_w[:, 2] - self.object_init_z
-        terminated = d > success_lift
+        terminated = d > self.success_height
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -303,33 +304,47 @@ class ThesisProjectEnv(DirectRLEnv):
             return torch.stack([local_pose[:, 0], local_pose[:, 1], local_pose[:, 2], qw, qx, qy, qz],dim=-1)
         
     def compute_rewards(self, actions,
-                        targ_dist: torch.Tensor,
-                        robot_lf_pos: torch.Tensor,
-                        robot_rf_pos: torch.Tensor,
+                        to_target: torch.Tensor,
                         ):
         # reward based on the distance from the target
-        reward_dist = 1.0 / (1.0 + targ_dist**2)
+        targ_dist = torch.norm(to_target, p=2, dim=-1)
+        dx = to_target[:, 0]
+        dy = to_target[:, 1]
+        dz = to_target[:, 2]
+
+        wx = 10.0  # es. 10.0
+        wy = 5.0  # es. 5.0
+        wz = 1.0  # es. 1.0
+        coord_cost = wx * dx*dx + wy * dy*dy + wz * dz*dz
+        reward_dist = (1.0 / (1.0 + coord_cost))
         reward_dist *= reward_dist
-        reward_dist = torch.where(targ_dist < 0.02, reward_dist*2, reward_dist)
+        
+        # reward_dist = 1.0 / (1.0 + targ_dist**2)
+        # reward_dist *= reward_dist
+        reward_dist = torch.where(targ_dist < 0.02, reward_dist*2.0, reward_dist)
 
         # distance improvement
-        # if not hasattr(self, "prev_targ_dist"):
-        #     self.prev_targ_dist = targ_dist.clone()
-        # improvement = torch.clamp(self.prev_targ_dist - targ_dist, min=0.0)
-        # reward_progress = 0.8 * improvement
-        # self.prev_targ_dist = targ_dist.detach()
+        improvement = torch.clamp(self.prev_targ_dist - targ_dist, min=0.0)
+        reward_progress = torch.where(targ_dist < 0.08, 30.0 * improvement, 0.0)
+        self.prev_targ_dist = targ_dist.detach()
 
         # gating coefficient near the target
-        r_soft  = 0.30  # inizia a contare già a 30 cm
+        r_soft  = 0.3  # inizia a contare già a 30 cm
         r_close = 0.12  # “conteggio pieno” sotto 12 cm
         w_rot = torch.clamp((r_soft - targ_dist)/(r_soft - r_close + 1e-8), 0.0, 1.0) # w_rot -> starts to allign relatively close to the target
-        w_near = torch.clamp(1.0 - targ_dist/0.2, 0.0, 1.0) # w_near -> starts to matter really close (finger related)
-        # w_near = torch.where(targ_dist < 0.2, 1.0, 0.0)
+        # w_rot = torch.clamp(1.0 - targ_dist/0.25, 0.0, 1.0)
+        enter = (targ_dist < self.r_in)
+        out = (targ_dist > self.r_out)
+        near_prev = self.near_gate # previous step condition
+        zeros = torch.zeros_like(near_prev, dtype=torch.bool)
+        ones = torch.ones_like(near_prev, dtype=torch.bool)
+        near = torch.where(enter, ones, torch.where(out, zeros, near_prev)) # new step condition
+        self.near_gate = near
 
         # orientation reward
-        fwd_axis = self.gripper_fwd_axis.expand(self.num_envs, -1)
-        gripper_up_axis = self.gripper_up_axis.expand(self.num_envs, -1)
-        object_up_axis = self.object_up_axis.expand(self.num_envs, -1)
+        fwd_axis           = self.gripper_fwd_axis.expand(self.num_envs, -1)
+        gripper_up_axis    = self.gripper_up_axis.expand(self.num_envs, -1)
+        object_up_axis     = self.object_up_axis.expand(self.num_envs, -1)
         object_inward_axis = self.object_inward_axis.expand(self.num_envs, -1)
 
         axis1 = self.rotate_vec_by_quat(fwd_axis, self.robot_grasp_rot) # forward gripper (world)
@@ -340,85 +355,32 @@ class ThesisProjectEnv(DirectRLEnv):
         dot1 = (axis1 * (-axis3)).sum(dim=-1).clamp(-1.0, 1.0)
         dot2 = (axis2 * axis4).sum(dim=-1).clamp(-1.0, 1.0)
 
-        rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
+        dot1_p = torch.clamp(dot1, 0.0, 1.0)
+        dot2_p = torch.clamp(dot2, 0.0, 1.0)
+
+        rot_term = 0.5 * (dot1_p**2 + dot2_p**2)
+        # rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
         reward_rot = w_rot * self.cfg.rot_reward_scale * rot_term
+        # gating on the orientation
+        in_ori_th = rot_term > self.ori_th
+        ori_ok = in_ori_th
+        self.ori_gate = ori_ok
 
-        # finger grasp reward
-        gap_des = 2.0 * (self.cube_half)
-        gap_finger = self.gap_finger.squeeze(-1)
-        gap_err = (gap_finger - gap_des) / gap_des
-
-        th_in, th_out = 0.15, 0.20
-        in_band_prev = getattr(self, "in_band", torch.zeros_like(gap_finger, dtype=torch.bool))
-        want_in = gap_err.abs() <= th_in
-        want_out = gap_err.abs() >= th_out
-        in_band = torch.where(
-            want_in, True,
-            torch.where(want_out, False, in_band_prev)
-        )
-        self.in_band = in_band
-        sigma = 0.25
-        gap_potential = torch.exp(-(gap_err.abs() / (sigma + 1e-8))**2)
-
-        gap_prev = getattr(self, "gap_prev", gap_finger)
-        dgap = (gap_finger - gap_prev)
-        self.gap_prev = gap_finger.detach()
-        penalty_dither = dgap.abs()
-
-        hold = getattr(self, "hold_ctr", torch.zeros_like(gap_finger))
-        hold = torch.where(in_band, torch.clamp(hold + 1.0, max=50.0), torch.zeros_like(hold))
-        self.hold_ctr = hold
-        hold_bonus = torch.clamp(hold / 20.0, max=1.0)
-
-        reward_finger = self.cfg.finger_reward_scale * w_near * (
-            0.8 * gap_potential + 0.2 * hold_bonus - 0.10 * penalty_dither
-        )
-        # gripper_close_axis = self.gripper_close_axis.expand(self.num_envs, -1)
-        # close_axis_w = self.rotate_vec_by_quat(gripper_close_axis, self.robot_grasp_rot)
-        # close_axis_w = torch.nn.functional.normalize(
-        #     torch.cross(axis4, -axis3, dim=-1), dim=-1
-        # )
-        # lf_pos = (robot_lf_pos * close_axis_w).sum(dim=-1)
-        # rf_pos = (robot_rf_pos * close_axis_w).sum(dim=-1)
-        # g_pos  = (self.object_grasp_pos_w * close_axis_w).sum(dim=-1)
-
-        # lf_dist = lf_pos - g_pos
-        # rf_dist = g_pos - rf_pos
-        # finger_penalty = torch.zeros_like(lf_dist)
-        # finger_penalty += torch.where(lf_dist < 0, lf_dist, torch.zeros_like(lf_dist))
-        # finger_penalty += torch.where(rf_dist < 0, rf_dist, torch.zeros_like(rf_dist))
-        # finger_penalty = w_near * finger_penalty * self.cfg.finger_reward_scale
-
-        # dL = ((robot_lf_pos - self.object_grasp_pos_w) * close_axis_w).sum(dim=-1)
-        # dR = ((robot_rf_pos - self.object_grasp_pos_w) * close_axis_w).sum(dim=-1)
-        # d_tar = self.cube_half + self.pad
-        # errL = torch.abs(dL + d_tar)
-        # errR = torch.abs(dR - d_tar)
-
-        # band = 0.02
-        # pos_reward = torch.clamp((1.0 - (errL + errR)/(2*band)), min=0.0, max=1.0)
-        # sym_reward = torch.exp(-0.5 * ((dL + dR) / 0.01)**2) # gaussian reward
-        # gap_proj = ((robot_rf_pos - robot_lf_pos) * close_axis_w).sum(dim=-1).abs()
-        # gap_err = torch.abs(gap_proj - 2*d_tar)
-        # gap_reward = torch.clamp((1.0 - gap_err/(2*self.pad)), min=0.0, max=1.0)
-
-        # q_f = self.robot.data.joint_pos[:, self.finger_joints_ids]
-        # q_lo = self.robot_dof_lower_limit[self.finger_joints_ids]
-        # q_hi = self.robot_dof_upper_limit[self.finger_joints_ids]
-        # q_norm = (q_f - q_lo) / (q_hi - q_lo + 1e-8) 
-        # closed_frac = 1.0 - q_norm.mean(dim=-1)
-        # near_contact = ((errL < 2*self.pad) & (errR < 2*self.pad)).float()
-        # close_hint = near_contact * closed_frac
-        # wrong_side = ((dL > 0.0) | (dR < 0.0)).float()
-
-        # reward_finger = self.cfg.finger_reward_scale * w_near * (
-        #     0.5 * pos_reward + 0.25 * gap_reward + 0.25 * sym_reward + 0.6 * close_hint
-        #     - 0.2 * wrong_side)
+        # grasp reward if near and positioned
+        w_grasp = (near & ori_ok).float()
+        # w_grasp = near.float()
+        reward_grasp = w_grasp * self.cfg.grasp_reward_scale
         
         # lift reward
         z = self.target_obj.data.root_pos_w[:, 2]
-        lift = torch.clamp(z - self.object_init_z, min=0.0)
-        reward_lift = lift * self.cfg.lift_reward_scale
+        lift = torch.clamp(z - self.object_init_z, min=0.0)  # quanto si è alzato il cubo
+        lift_norm = torch.clamp(lift / self.success_height, 0.0, 1.0)
+
+        reward_lift = w_grasp * self.cfg.lift_reward_scale * lift_norm
+        
+        reward_lift = torch.where(lift > 0.01, reward_lift + 0.1, reward_lift)
+        reward_lift = torch.where(lift > 0.05, reward_lift + 0.2, reward_lift)
+        reward_lift = torch.where(lift > self.success_height, reward_lift + 2.0, reward_lift)
 
         # lfinger_dist = robot_lf_pos[:, 1] - self.object_grasp_pos_w[:, 1]
         # rfinger_dist = self.object_grasp_pos_w[:, 1] - robot_rf_pos[:, 1]
@@ -434,23 +396,35 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # compute reward
         reward = (reward_dist
-                  + reward_rot 
+                  + reward_progress
+                  + reward_rot
+                  + reward_grasp
                   + reward_lift
-                  + reward_finger
                   - penalty_action )
-
-        #reward for lifting the object
-        reward = torch.where(lift > 0.01, reward + 0.25, reward)
-        reward = torch.where(lift > 0.05, reward + 0.25, reward)
-        reward = torch.where(lift > 0.1 , reward + 0.25, reward)
 
         if self.global_step % 100 == 0:
             self.writer.add_scalar("geom/to_target", targ_dist.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/rot_term", rot_term.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/lift", lift.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/coord_cost", coord_cost.mean().item(), self.global_step)
             self.writer.add_scalar("reward/total", reward.mean().item(), self.global_step)
             self.writer.add_scalar("reward/dist", reward_dist.mean().item(), self.global_step)
             self.writer.add_scalar("reward/rot", reward_rot.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/grasp", reward_grasp.mean().item(), self.global_step)
             self.writer.add_scalar("reward/lift", reward_lift.mean().item(), self.global_step)
-            self.writer.add_scalar("reward/fingers", reward_finger.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/progress", reward_progress.mean().item(), self.global_step)
+            
+        
+        grasp_active = w_grasp > 0.5
+        if self.global_step % 100 == 0:
+            self.writer.add_scalar("debug/targ_dist_mean", targ_dist.mean().item(), self.global_step)
+            self.writer.add_scalar("debug/targ_dist_min", targ_dist.min().item(), self.global_step)
+            if grasp_active.any():
+                self.writer.add_scalar(
+                    "debug/targ_dist_grasp",
+                    targ_dist[grasp_active].mean().item(),
+                    self.global_step,
+                )
     
         return reward
     
@@ -515,6 +489,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_grasp_rot_w[env_ids] = obj_quat_w
 
         self.ee_marker.visualize(self.robot_grasp_pos.detach().cpu())
+        self.object_marker.visualize(self.object_grasp_pos_w.detach().cpu())
 
     def quat_conjugate(self, q: torch.Tensor):
         w, x, y, z = q.unbind(-1)
@@ -555,139 +530,3 @@ def compute_rewards(
     rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
     total_reward = rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel
     return total_reward
-
-# def define_markers() -> VisualizationMarkers:
-#     """Define markers with various different shapes"""
-#     marker_cfg = VisualizationMarkersCfg(
-#         prim_path="Visuals/myMarkers",
-#         markers={
-#             "forward": sim_utils.UsdFileCfg(
-#                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-#                 scale=(0.25, 0.25, 0.5),
-#                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 1.0)),
-#             ),
-#             "command": sim_utils.UsdFileCfg(
-#                 usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-#                 scale=(0.25, 0.25, 0.5),
-#                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-#             ),
-#         },
-#     )
-#     return VisualizationMarkers(cfg=marker_cfg)
-
-
-# class ThesisProjectEnv(DirectRLEnv):
-#     cfg: ThesisProjectEnvCfg
-
-#     def __init__(self, cfg: ThesisProjectEnvCfg, render_mode: str | None = None, **kwargs):
-#         super().__init__(cfg, render_mode, **kwargs)
-
-#         self.dof_idx, _ = self.robot.find_joints(self.cfg.dof_names)
-
-#     def _setup_scene(self):
-#         self.robot = Articulation(self.cfg.robot_cfg)
-#         # add ground plane
-#         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-#         # clone and replicate
-#         self.scene.clone_environments(copy_from_source=False)
-#         # add articulation to scene
-#         self.scene.articulations["robot"] = self.robot
-#         # add lights
-#         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
-#         light_cfg.func("/World/Light", light_cfg)
-
-#         self.visualization_markers = define_markers()
-
-#         # setting aside useful variables for later
-#         self.up_dir = torch.tensor([0.0, 0.0, 1.0]).cuda()
-#         self.yaws = torch.zeros((self.cfg.scene.num_envs, 1)).cuda()
-#         self.commands = torch.randn((self.cfg.scene.num_envs, 3)).cuda()
-#         self.commands[:,-1] == 0.0
-#         self.commands = self.commands/torch.linalg.norm(self.commands, dim = 1, keepdim = True)
-
-#         # offsets to account for atan range and keep things on [-pi, pi]
-#         ratio = self.commands[:,1]/(self.commands[:,0]+1E-8)
-#         gzero = torch.where(self.commands > 0, True, False)
-#         lzero = torch.where(self.commands < 0, True, False)
-#         plus = lzero[:,0]*gzero[:,1]
-#         minus = lzero[:,0]*lzero[:,1]
-#         offsets = torch.pi*plus - torch.pi*minus
-#         self.yaws = torch.atan(ratio).reshape(-1,1) + offsets.reshape(-1,1)
-
-#         self.marker_locations = torch.zeros((self.cfg.scene.num_envs, 3)).cuda()
-#         self.marker_offset = torch.zeros((self.cfg.scene.num_envs, 3)).cuda()
-#         self.marker_offset[:,-1] = 0.5
-#         self.forward_marker_orientations = torch.zeros((self.cfg.scene.num_envs, 4)).cuda()
-#         self.command_marker_orientations = torch.zeros((self.cfg.scene.num_envs, 4)).cuda()
-
-#     def _visualize_markers(self):
-#         # get marker locations and orientations
-#         self.marker_locations = self.robot.data.root_pos_w
-#         self.forward_marker_orientations = self.robot.data.root_quat_w
-#         self.command_marker_orientations = math_utils.quat_from_angle_axis(self.yaws, self.up_dir).squeeze()
-
-#         # offset markers so they are above the jetbot
-#         loc = self.marker_locations + self.marker_offset
-#         loc = torch.vstack((loc, loc))
-#         rots = torch.vstack((self.forward_marker_orientations, self.command_marker_orientations))
-
-#         # render the markers
-#         all_envs = torch.arange(self.cfg.scene.num_envs)
-#         indices = torch.hstack((torch.zeros_like(all_envs), torch.ones_like(all_envs)))
-#         self.visualization_markers.visualize(loc, rots, marker_indices=indices)
-
-#     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-#         self.actions = actions.clone()
-#         self._visualize_markers()
-
-#     def _apply_action(self) -> None:
-#         self.robot.set_joint_velocity_target(self.actions, joint_ids=self.dof_idx)
-
-#     def _get_observations(self) -> dict:
-#         self.velocity = self.robot.data.root_com_vel_w
-#         self.forwards = math_utils.quat_apply(self.robot.data.root_link_quat_w, self.robot.data.FORWARD_VEC_B)
-
-#         dot = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
-#         cross = torch.cross(self.forwards, self.commands, dim=-1)[:,-1].reshape(-1,1)
-#         forward_speed = self.robot.data.root_com_lin_vel_b[:,0].reshape(-1,1)
-#         obs = torch.hstack((dot, cross, forward_speed))
-
-#         observations = {"policy": obs}
-#         return observations
-
-#     def _get_rewards(self) -> torch.Tensor:
-#         forward_reward = self.robot.data.root_com_lin_vel_b[:,0].reshape(-1,1)
-#         allignment_reward = torch.sum(self.forwards * self.commands, dim=-1, keepdim=True)
-#         total_reward = forward_reward * torch.exp(allignment_reward)
-#         return total_reward
-
-#     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-#         time_out = self.episode_length_buf >= self.max_episode_length - 1
-
-#         return False, time_out
-
-#     def _reset_idx(self, env_ids: Sequence[int] | None):
-#         if env_ids is None:
-#             env_ids = self.robot._ALL_INDICES
-#         super()._reset_idx(env_ids)
-
-#         # pick new commands for reset envs
-#         self.commands[env_ids] = torch.randn((len(env_ids), 3)).cuda()
-#         self.commands[env_ids,-1] = 0.0
-#         self.commands[env_ids] = self.commands[env_ids]/torch.linalg.norm(self.commands[env_ids], dim=1, keepdim=True)
-
-#         # recalculate the orientations for the command markers with the new commands
-#         ratio = self.commands[env_ids][:,1]/(self.commands[env_ids][:,0]+1E-8)
-#         gzero = torch.where(self.commands[env_ids] > 0, True, False)
-#         lzero = torch.where(self.commands[env_ids]< 0, True, False)
-#         plus = lzero[:,0]*gzero[:,1]
-#         minus = lzero[:,0]*lzero[:,1]
-#         offsets = torch.pi*plus - torch.pi*minus
-#         self.yaws[env_ids] = torch.atan(ratio).reshape(-1,1) + offsets.reshape(-1,1)
-
-#         # set the root state for the reset envs
-#         default_root_state = self.robot.data.default_root_state[env_ids]
-#         default_root_state[:, :3] += self.scene.env_origins[env_ids]
-
-#         self.robot.write_root_state_to_sim(default_root_state, env_ids)
-#         self._visualize_markers()
