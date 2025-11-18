@@ -156,7 +156,8 @@ class ThesisProjectEnv(DirectRLEnv):
         gripper_cmd = gripper_cmd.expand(-1, 2)
         OPEN = 1.0
         CLOSE = -1.0
-        grasp_phase_ok = (self.near_gate & self.ori_gate)
+        # grasp_phase_ok = (self.near_gate & self.ori_gate)
+        grasp_phase_ok = (self.near_gate)
         mask = grasp_phase_ok.unsqueeze(-1).expand(-1, 2)
         cmd = torch.where(mask, torch.full_like(gripper_cmd, CLOSE), torch.full_like(gripper_cmd, OPEN))
         # fingers section action
@@ -304,7 +305,7 @@ class ThesisProjectEnv(DirectRLEnv):
             return torch.stack([local_pose[:, 0], local_pose[:, 1], local_pose[:, 2], qw, qx, qy, qz],dim=-1)
         
     def compute_rewards(self, actions,
-                        to_target: torch.Tensor,
+                        to_target: torch.Tensor
                         ):
         # reward based on the distance from the target
         targ_dist = torch.norm(to_target, p=2, dim=-1)
@@ -362,24 +363,25 @@ class ThesisProjectEnv(DirectRLEnv):
         # rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
         reward_rot = w_rot * self.cfg.rot_reward_scale * rot_term
         # gating on the orientation
-        in_ori_th = rot_term > self.ori_th
-        ori_ok = in_ori_th
-        self.ori_gate = ori_ok
+        # in_ori_th = rot_term > self.ori_th
+        # ori_ok = in_ori_th
+        # self.ori_gate = ori_ok
 
-        # grasp reward if near and positioned
-        w_grasp = (near & ori_ok).float()
-        # w_grasp = near.float()
-        reward_grasp = w_grasp * self.cfg.grasp_reward_scale
+        # grasp reward if near and finger closed
+        lf_joint = self.robot.data.joint_pos[:, self.left_finger_joint_idx]
+        rf_joint = self.robot.data.joint_pos[:, self.right_finger_joint_idx]
+        finger_mean = 0.5 * (lf_joint + rf_joint)
+        gripper_closed = (finger_mean <= 0.01)
+        grasp_success = (near & gripper_closed).float()
+        reward_grasp = grasp_success * self.cfg.grasp_reward_scale
         
         # lift reward
         z = self.target_obj.data.root_pos_w[:, 2]
         lift = torch.clamp(z - self.object_init_z, min=0.0)  # quanto si è alzato il cubo
         lift_norm = torch.clamp(lift / self.success_height, 0.0, 1.0)
 
-        reward_lift = w_grasp * self.cfg.lift_reward_scale * lift_norm
+        reward_lift = grasp_success * self.cfg.lift_reward_scale * lift_norm
         
-        reward_lift = torch.where(lift > 0.01, reward_lift + 0.1, reward_lift)
-        reward_lift = torch.where(lift > 0.05, reward_lift + 0.2, reward_lift)
         reward_lift = torch.where(lift > self.success_height, reward_lift + 2.0, reward_lift)
 
         # lfinger_dist = robot_lf_pos[:, 1] - self.object_grasp_pos_w[:, 1]
@@ -415,10 +417,11 @@ class ThesisProjectEnv(DirectRLEnv):
             self.writer.add_scalar("reward/progress", reward_progress.mean().item(), self.global_step)
             
         
-        grasp_active = w_grasp > 0.5
+        grasp_active = grasp_success > 0.5
         if self.global_step % 100 == 0:
             self.writer.add_scalar("debug/targ_dist_mean", targ_dist.mean().item(), self.global_step)
             self.writer.add_scalar("debug/targ_dist_min", targ_dist.min().item(), self.global_step)
+            self.writer.add_scalar("debug/finger_mean", finger_mean.min().item(), self.global_step)
             if grasp_active.any():
                 self.writer.add_scalar(
                     "debug/targ_dist_grasp",
