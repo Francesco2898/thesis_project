@@ -51,6 +51,6 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     action_scale = 1.0
     dof_velocity_scale = 0.1
     action_penalty_scale = 0.01
-    rot_reward_scale = 0.8
+    rot_reward_scale = 1.0
     lift_reward_scale = 8.0
     grasp_reward_scale = 0.5

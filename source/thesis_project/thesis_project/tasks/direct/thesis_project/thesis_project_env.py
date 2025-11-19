@@ -381,7 +381,7 @@ class ThesisProjectEnv(DirectRLEnv):
         lift_norm = torch.clamp(lift / self.success_height, 0.0, 1.0)
 
         reward_lift = grasp_success * self.cfg.lift_reward_scale * lift_norm
-        
+        reward_lift = torch.where(lift > 0.01, reward_lift + 0.1, reward_lift)
         reward_lift = torch.where(lift > self.success_height, reward_lift + 2.0, reward_lift)
 
         # lfinger_dist = robot_lf_pos[:, 1] - self.object_grasp_pos_w[:, 1]
