@@ -35,7 +35,7 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10
     # - space definition
     action_space = 9
-    observation_space = 25
+    observation_space = 26
     state_space = 0
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/60, render_interval=decimation)
@@ -52,5 +52,6 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     dof_velocity_scale = 0.1
     action_penalty_scale = 0.01
     rot_reward_scale = 1.0
-    lift_reward_scale = 8.0
-    grasp_reward_scale = 0.5
+    lift_reward_scale = 0.5
+    grasp_reward_scale = 3.0
+    goal_reward_scale = 2.0
