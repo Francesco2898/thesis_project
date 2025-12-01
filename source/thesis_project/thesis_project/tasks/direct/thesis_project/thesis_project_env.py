@@ -85,8 +85,10 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # target auxiliary variables
         # sample of the new target in a box space
-        self.box_min = torch.tensor([-0.5, -0.5, 0.021], device=self.device)
-        self.box_max = torch.tensor([0.5, 0.5, 0.021], device=self.device)
+        # self.box_min = torch.tensor([-0.4, -0.4, 0.021], device=self.device)
+        # self.box_max = torch.tensor([0.4, 0.4, 0.021], device=self.device)
+        self.box_min = torch.tensor([0.2, -0.3, 0.021], device=self.device)
+        self.box_max = torch.tensor([0.6,  0.3, 0.021], device=self.device)
         self.object_init_z = torch.zeros(self.num_envs, device=self.device)
         self.r_in, self.r_out = 0.025, 0.05
         self.near_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -386,7 +388,7 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # grasp reward
         grasp_success = ((~self.prev_has_object) & (self.has_object))
-        reward_grasp = self.cfg.grasp_reward_scale * grasp_success.float()
+        # reward_grasp = self.cfg.grasp_reward_scale * grasp_success.float()
         self.prev_has_object = self.has_object.clone()
 
         # actions pensalty
@@ -399,7 +401,6 @@ class ThesisProjectEnv(DirectRLEnv):
                   + reward_progress
                   + reward_rot
                   + reward_lift
-                  + reward_grasp
                   - penalty_action )
 
         if self.global_step % 100 == 0:
@@ -407,6 +408,7 @@ class ThesisProjectEnv(DirectRLEnv):
             self.writer.add_scalar("geom/goal_dist_mean",  goal_dist.mean().item(),  self.global_step)
             self.writer.add_scalar("geom/rot_term", rot_term.mean().item(), self.global_step)
             self.writer.add_scalar("geom/lift", lift.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/has_object_mean", phase.mean().item(), self.global_step)
 
             self.writer.add_scalar("reward/total", reward.mean().item(), self.global_step)
             self.writer.add_scalar("reward/reward_reach", reward_reach.mean().item(), self.global_step)
@@ -414,7 +416,7 @@ class ThesisProjectEnv(DirectRLEnv):
             self.writer.add_scalar("reward/progress", reward_progress.mean().item(), self.global_step)
             self.writer.add_scalar("reward/rot", reward_rot.mean().item(), self.global_step)
             self.writer.add_scalar("reward/lift", reward_lift.mean().item(), self.global_step)
-            self.writer.add_scalar("reward/grasp", reward_grasp.mean().item(), self.global_step)
+            # self.writer.add_scalar("reward/grasp", reward_grasp.mean().item(), self.global_step)
     
         return reward
     
@@ -461,7 +463,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_marker.visualize(self.object_grasp_pos_w.detach().cpu())
         self.place_pos_marker.visualize(self.place_pos_w.detach().cpu())
 
-    def reward_dist(self, dist_vec: torch.Tensor): 
+    def reward_dist(self, dist_vec: torch.Tensor):
         dist = torch.norm(dist_vec, p=2, dim=-1)
         dx = dist_vec[:, 0]
         dy = dist_vec[:, 1]
@@ -476,7 +478,7 @@ class ThesisProjectEnv(DirectRLEnv):
         
         # reward_dist = 1.0 / (1.0 + targ_dist**2)
         # reward_dist *= reward_dist
-        reward_dist = torch.where(dist < 0.02, reward_dist*2.0, reward_dist)
+        reward_dist = torch.where(dist < 0.05, reward_dist*2.0, reward_dist)
         return reward_dist, dist
 
     def quat_conjugate(self, q: torch.Tensor):
@@ -520,23 +522,23 @@ class ThesisProjectEnv(DirectRLEnv):
         return v + w.unsqueeze(-1)*t + torch.cross(qv, t, dim=-1)
 
 
-@torch.jit.script
-def compute_rewards(
-    rew_scale_alive: float,
-    rew_scale_terminated: float,
-    rew_scale_pole_pos: float,
-    rew_scale_cart_vel: float,
-    rew_scale_pole_vel: float,
-    pole_pos: torch.Tensor,
-    pole_vel: torch.Tensor,
-    cart_pos: torch.Tensor,
-    cart_vel: torch.Tensor,
-    reset_terminated: torch.Tensor,
-):
-    rew_alive = rew_scale_alive * (1.0 - reset_terminated.float())
-    rew_termination = rew_scale_terminated * reset_terminated.float()
-    rew_pole_pos = rew_scale_pole_pos * torch.sum(torch.square(pole_pos).unsqueeze(dim=1), dim=-1)
-    rew_cart_vel = rew_scale_cart_vel * torch.sum(torch.abs(cart_vel).unsqueeze(dim=1), dim=-1)
-    rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
-    total_reward = rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel
-    return total_reward
+# @torch.jit.script
+# def compute_rewards(
+#     rew_scale_alive: float,
+#     rew_scale_terminated: float,
+#     rew_scale_pole_pos: float,
+#     rew_scale_cart_vel: float,
+#     rew_scale_pole_vel: float,
+#     pole_pos: torch.Tensor,
+#     pole_vel: torch.Tensor,
+#     cart_pos: torch.Tensor,
+#     cart_vel: torch.Tensor,
+#     reset_terminated: torch.Tensor,
+# ):
+#     rew_alive = rew_scale_alive * (1.0 - reset_terminated.float())
+#     rew_termination = rew_scale_terminated * reset_terminated.float()
+#     rew_pole_pos = rew_scale_pole_pos * torch.sum(torch.square(pole_pos).unsqueeze(dim=1), dim=-1)
+#     rew_cart_vel = rew_scale_cart_vel * torch.sum(torch.abs(cart_vel).unsqueeze(dim=1), dim=-1)
+#     rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
+#     total_reward = rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel
+#     return total_reward
