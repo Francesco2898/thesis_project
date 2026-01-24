@@ -20,6 +20,8 @@ from isaaclab.assets import RigidObjectCfg, RigidObject
 import isaaclab.utils.math as math_utils
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from torch.utils.tensorboard import SummaryWriter
+# import omni.physx as physx
+# print([x for x in dir(physx) if "get_" in x or "interface" in x or "tensor" in x or "subscribe" in x])
 
 from .thesis_project_env_cfg import ThesisProjectEnvCfg
 
@@ -45,6 +47,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.robot_dof_lower_limit = self.robot.data.soft_joint_pos_limits[0, :, 0].to(device = self.device)
         self.robot_dof_upper_limit = self.robot.data.soft_joint_pos_limits[0, :, 1].to(device = self.device)
         self.robot_effort_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
+        self.table_h = self.cfg.table_height
 
         self.ee_offset = 0.03
         self.gripper_fwd_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
@@ -75,6 +78,14 @@ class ThesisProjectEnv(DirectRLEnv):
             device=self.device, dtype=torch.long
         )
 
+        self.frame_link_2_idx = self.robot.find_bodies("panda_link2")[0][0]
+        self.frame_link_4_idx = self.robot.find_bodies("panda_link4")[0][0]
+        self.frame_link_6_idx = self.robot.find_bodies("panda_link6")[0][0]
+        self.frame_link_ids   = torch.tensor(
+            [self.frame_link_2_idx, self.frame_link_4_idx, self.frame_link_6_idx, self.hand_link_idx],
+            device=self.device, dtype=torch.long
+        )
+
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.robot_grasp_rot = torch.zeros((self.num_envs, 4), device=self.device)
 
@@ -87,8 +98,10 @@ class ThesisProjectEnv(DirectRLEnv):
         # sample of the new target in a box space
         # self.box_min = torch.tensor([-0.4, -0.4, 0.021], device=self.device)
         # self.box_max = torch.tensor([0.4, 0.4, 0.021], device=self.device)
-        self.box_min = torch.tensor([0.2, -0.3, 0.021], device=self.device)
-        self.box_max = torch.tensor([0.6,  0.3, 0.021], device=self.device)
+        self.box1_min = torch.tensor([0.1, -0.35, self.table_h + 0.021], device=self.device)
+        self.box1_max = torch.tensor([0.6, -0.2, self.table_h + 0.021], device=self.device)
+        self.box2_min = torch.tensor([0.1, 0.2, self.table_h + 0.021], device=self.device)
+        self.box2_max = torch.tensor([0.6, 0.35, self.table_h + 0.021], device=self.device)
         self.object_init_z = torch.zeros(self.num_envs, device=self.device)
         self.r_in, self.r_out = 0.025, 0.05
         self.near_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -100,17 +113,24 @@ class ThesisProjectEnv(DirectRLEnv):
         self.prev_has_object = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.hold_steps = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.place_ori = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 4)
+        self.ground_up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
+        self.ground_inward_axis = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
+
+        self.hit_obstacle_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
 
     def _setup_scene(self):
 
         self.robot = Articulation(self.cfg.robot_cfg)
+        self.table = RigidObject(self.cfg.table_cfg)
         print("[DEBUG] Actuator config:")
         print(self.robot.cfg.actuators)
         # target position in local coordinates
-        self.target_pos = torch.tensor([[0.5, 0.5, 0.021]], device=self.device).repeat(self.num_envs, 1)
+        self.target_pos = torch.tensor([[0.5, 0.5, self.cfg.table_height + 0.021]], device=self.device).repeat(self.num_envs, 1)
 
-        self.place_pos_local = torch.tensor([[-0.5, -0.5, 0.021]], device=self.device).repeat(self.num_envs, 1)
-
+        self.place_pos_local = torch.tensor([[-0.5, -0.5, self.cfg.table_height + 0.021]], device=self.device).repeat(self.num_envs, 1)
+        
+        # Target object configuration
         target_obj_cfg = RigidObjectCfg(
             prim_path="/World/envs/env_.*/TargetObject",
             spawn=sim_utils.CuboidCfg(
@@ -121,12 +141,32 @@ class ThesisProjectEnv(DirectRLEnv):
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.6, 1.0)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(
-                pos=(0.5, 0.5, 0.021),
+                pos=(0.5, 0.5, self.cfg.table_height + 0.021),
                 rot=(1.0, 0.0, 0.0, 0.0)
             ),
             debug_vis=True
         )
         self.target_obj = RigidObject(target_obj_cfg)
+
+        # Obstacle configuration
+        obstacle_cfg = RigidObjectCfg(
+            prim_path="/World/envs/env_.*/Obstacle",
+            spawn=sim_utils.CylinderCfg(
+                radius= self.cfg.obstacle_radius,
+                height= self.cfg.obstacle_height,
+                axis="Z",
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
+                mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
+                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.6, 1.0)),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(
+                pos= (0.4, 0.0, self.cfg.table_height + 0.5*self.cfg.obstacle_height),
+                rot= (1.0, 0.0, 0.0, 0.0),
+            ),
+            debug_vis=True,
+        )
+        self.obstacle = RigidObject(obstacle_cfg)
 
         # adding a marker following the end_effector
         target_marker_cfg = VisualizationMarkersCfg(
@@ -141,9 +181,11 @@ class ThesisProjectEnv(DirectRLEnv):
         self.ee_marker = VisualizationMarkers(target_marker_cfg)
         self.object_marker = VisualizationMarkers(target_marker_cfg)
         self.place_pos_marker = VisualizationMarkers(target_marker_cfg)
-        # add articulation to scene
+        # add the components to the scene
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["target"] = self.target_obj
+        self.scene.rigid_objects["table"] = self.table
+        self.scene.rigid_objects["obstacle"] = self.obstacle
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate
@@ -224,6 +266,12 @@ class ThesisProjectEnv(DirectRLEnv):
         lift = torch.clamp((z - self.object_init_z), min=0.0, max=self.success_height)
         lift_height = (lift/self.success_height).unsqueeze(-1)
 
+        # to obstacle
+        probes = self.compute_probe_points_pos()
+        _, clear_vec = self.compute_min_obstacle_distance(probes)
+        scale = 0.2
+        clear_obs = torch.tanh(clear_vec/scale)
+
         # joint state
         joint_pos = self.robot.data.joint_pos
         joint_vel = self.robot.data.joint_vel
@@ -235,7 +283,8 @@ class ThesisProjectEnv(DirectRLEnv):
                             phase_mask,
                             to_target,
                             ori_err,
-                            lift_height
+                            lift_height,
+                            clear_obs
                             ))
         obs = torch.nan_to_num(obs, nan=0, posinf=1e6, neginf=-1e6)
         observations = {"policy": torch.clamp(obs, -5.0, 5.0)}
@@ -254,8 +303,21 @@ class ThesisProjectEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         goal_dist = torch.norm(self.place_pos_w - self.target_obj.data.root_pos_w, dim=-1)
-        goal_err_dist = 0.02
-        terminated = (goal_dist < goal_err_dist) & (~self.has_object) 
+        goal_err_dist = 0.025
+        terminated_task = (goal_dist < goal_err_dist) & (~self.has_object)
+
+        # obstacle hard-stop
+        probes = self.compute_probe_points_pos()
+        min_clear, _ = self.compute_min_obstacle_distance(probes)
+        HARD_PEN_TH = -0.005
+        hit_obstacle = min_clear <= HARD_PEN_TH
+        self.hit_obstacle_buf = hit_obstacle
+        if self.global_step % 100 == 0:
+            self.writer.add_scalar("term/terminated_obs_rate", hit_obstacle.float().mean().item(), self.global_step)
+
+        # terminated condition
+        terminated = terminated_task | hit_obstacle
+
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
 
@@ -279,7 +341,7 @@ class ThesisProjectEnv(DirectRLEnv):
 
         # target reset
         # local position wrt the env
-        new_target_pos_local = sample_uniform(self.box_min, self.box_max, (len(env_ids), 3), device=self.device)
+        new_target_pos_local = sample_uniform(self.box1_min, self.box1_max, (len(env_ids), 3), device=self.device)
         self.target_pos[env_ids] = new_target_pos_local
 
         new_target_pos_w = new_target_pos_local + self.scene.env_origins[env_ids]
@@ -295,7 +357,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_init_z[env_ids] = self.target_obj.data.root_pos_w[env_ids, 2]
 
         # goal reset
-        new_place_pos_local = sample_uniform(self.box_min, self.box_max, (len(env_ids), 3), device=self.device)
+        new_place_pos_local = sample_uniform(self.box2_min, self.box2_max, (len(env_ids), 3), device=self.device)
         self.place_pos_local[env_ids] = new_place_pos_local
 
         self.compute_intermediate_values()
@@ -344,45 +406,40 @@ class ThesisProjectEnv(DirectRLEnv):
         near = torch.where(enter, ones, torch.where(out, zeros, near_prev)) # new step condition
         self.near_gate = near
 
-        # orientation reward
-        fwd_axis           = self.gripper_fwd_axis.expand(self.num_envs, -1)
-        gripper_up_axis    = self.gripper_up_axis.expand(self.num_envs, -1)
-        object_up_axis     = self.object_up_axis.expand(self.num_envs, -1)
-        object_inward_axis = self.object_inward_axis.expand(self.num_envs, -1)
+        # # orientation reward
+        rot_term_reach = self.reward_rot(self.object_up_axis, self.object_inward_axis, self.object_grasp_rot_w)
 
-        axis1 = self.rotate_vec_by_quat(fwd_axis, self.robot_grasp_rot) # forward gripper (world)
-        axis2 = self.rotate_vec_by_quat(gripper_up_axis, self.robot_grasp_rot) # gripper up axis (world)
-        axis3 = self.rotate_vec_by_quat(object_up_axis, self.object_grasp_rot_w) # up direction object (world)
-        axis4 = self.rotate_vec_by_quat(object_inward_axis, self.object_grasp_rot_w) # inward direction object (world)
-
-        dot1 = (axis1 * (-axis3)).sum(dim=-1).clamp(-1.0, 1.0)
-        dot2 = (axis2 * axis4).sum(dim=-1).clamp(-1.0, 1.0)
-
-        dot1_p = torch.clamp(dot1, 0.0, 1.0)
-        dot2_p = torch.clamp(dot2, 0.0, 1.0)
-
-        rot_term = 0.5 * (dot1_p**2 + dot2_p**2)
-        # rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
-        reward_rot = w_rot * self.cfg.rot_reward_scale * rot_term
-        # gating on the orientation
-        # in_ori_th = rot_term > self.ori_th
-        # ori_ok = in_ori_th
-        # self.ori_gate = ori_ok
+        rot_term_place = self.reward_rot(self.ground_up_axis, self.ground_inward_axis, self.place_ori)
         
         # lift reward
         z = self.target_obj.data.root_pos_w[:, 2]
         lift = torch.clamp(z - self.object_init_z, min=0.0)  # quanto si è alzato il cubo
         lift_norm = torch.clamp(lift / self.success_height, 0.0, 1.0)
 
+        # lifted = lift >= 0.001
+        # hold_cond = (lifted & (targ_dist < self.r_in))
+        # self.hold_steps = torch.where(hold_cond, self.hold_steps + 1, torch.zeros_like(self.hold_steps))
+        # HOLD_MIN_STEP = 5
+        # self.has_object = self.hold_steps >= HOLD_MIN_STEP
+
         lifted = lift >= 0.001
-        hold_cond = (lifted & (targ_dist < self.r_in))
-        self.hold_steps = torch.where(hold_cond, self.hold_steps + 1, torch.zeros_like(self.hold_steps))
+        finger_q = self.robot.data.joint_pos[:, self.finger_joints_ids]
+        finger_mean = finger_q.mean(dim=-1)
+        CLOSE_TH = 0.02
+        finger_closed = finger_mean < CLOSE_TH
+
+        near = targ_dist < self.r_in
+
+        has_object_candidate = lifted | (finger_closed & near)
         HOLD_MIN_STEP = 5
+        self.hold_steps = torch.where(has_object_candidate, self.hold_steps + 1, torch.zeros_like(self.hold_steps))
         self.has_object = self.hold_steps >= HOLD_MIN_STEP
 
         phase = self.has_object.float()
         reward_reach = (1.0 - phase)*reward_reach
         reward_place = phase * reward_place * self.cfg.goal_reward_scale
+        reward_rot_reach = (1.0 - phase) * rot_term_reach * self.cfg.rot_reward_scale
+        reward_rot_place = phase * rot_term_place * self.cfg.rot_reward_scale
         reward_progress = (1.0 - phase) * reward_progress
         reward_lift = self.cfg.lift_reward_scale * lift_norm
 
@@ -395,27 +452,51 @@ class ThesisProjectEnv(DirectRLEnv):
         penalty_action = torch.sum(actions**2, dim=-1)
         penalty_action = self.cfg.action_penalty_scale * penalty_action
 
+        # near collision penalty
+        probes = self.compute_probe_points_pos()
+        min_clear, _ = self.compute_min_obstacle_distance(probes)
+
+        # w_obs = torch.clamp((1.5*self.cfg.safe_margin - min_clear)/1.5*self.cfg.safe_margin, 0.0, 1.0)
+        # penalty_obstacle = (self.cfg.safe_margin/(self.cfg.safe_margin + min_clear))**4
+        # penalty_obstacle = w_obs * self.cfg.obstacle_penalty_scale * penalty_obstacle
+        viol = torch.clamp(self.cfg.safe_margin - min_clear, min=0.0)
+        penalty_obstacle = self.cfg.obstacle_penalty_scale * viol**2
+
+        HARD_TH = -0.005  # same as get_dones
+        hit_obstacle = min_clear < HARD_TH
+
+        terminal_collision_pen = self.cfg.terminal_collision_penalty
+        penalty_terminal = terminal_collision_pen * hit_obstacle.float()
+
         # compute reward
         reward = (reward_reach
                   + reward_place
                   + reward_progress
-                  + reward_rot
+                  + reward_rot_reach
+                  + reward_rot_place
                   + reward_lift
-                  - penalty_action )
+                  - penalty_action
+                  - penalty_obstacle
+                  - penalty_terminal)
 
         if self.global_step % 100 == 0:
             self.writer.add_scalar("geom/reach_dist_mean", targ_dist.mean().item(), self.global_step)
             self.writer.add_scalar("geom/goal_dist_mean",  goal_dist.mean().item(),  self.global_step)
-            self.writer.add_scalar("geom/rot_term", rot_term.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/rot_term_reach", rot_term_reach.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/rot_term_place", rot_term_place.mean().item(), self.global_step)
             self.writer.add_scalar("geom/lift", lift.mean().item(), self.global_step)
             self.writer.add_scalar("geom/has_object_mean", phase.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/min_clearance_mean", min_clear.mean().item(), self.global_step)
 
             self.writer.add_scalar("reward/total", reward.mean().item(), self.global_step)
             self.writer.add_scalar("reward/reward_reach", reward_reach.mean().item(), self.global_step)
             self.writer.add_scalar("reward/reward_place", reward_place.mean().item(), self.global_step)
             self.writer.add_scalar("reward/progress", reward_progress.mean().item(), self.global_step)
-            self.writer.add_scalar("reward/rot", reward_rot.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/rot_reach", reward_rot_reach.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/rot_place", reward_rot_place.mean().item(), self.global_step)
             self.writer.add_scalar("reward/lift", reward_lift.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/penalty_obstacle", penalty_obstacle.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/penalty_terminal", penalty_terminal.mean().item(), self.global_step)
             # self.writer.add_scalar("reward/grasp", reward_grasp.mean().item(), self.global_step)
     
         return reward
@@ -463,6 +544,80 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_marker.visualize(self.object_grasp_pos_w.detach().cpu())
         self.place_pos_marker.visualize(self.place_pos_w.detach().cpu())
 
+    def compute_probe_points_pos(self, joints_link_ids: torch.Tensor | None = None):
+        if joints_link_ids is None:
+            joints_link_ids = self.frame_link_ids
+
+        p2 = self.robot.data.body_pos_w[:, self.frame_link_2_idx]
+        p4 = self.robot.data.body_pos_w[:, self.frame_link_4_idx]
+        p6 = self.robot.data.body_pos_w[:, self.frame_link_6_idx]
+        p7 = self.robot.data.body_pos_w[:, self.hand_link_idx]
+        pg = self.robot_grasp_pos
+
+        def lerp_points(p1: torch.Tensor, p2: torch.Tensor, ts: list[float]) -> torch.Tensor:
+            p1 = p1.unsqueeze(1)
+            p2 = p2.unsqueeze(1)
+            t  = torch.tensor(ts, device=self.device, dtype=p1.dtype).view(1, -1, 1)
+            return (1.0 - t)*p1 + t*p2
+        
+        seg_24 = lerp_points(p2, p4, [0.25, 0.5, 0.75])
+        seg_46 = lerp_points(p4, p6, [0.25, 0.5, 0.75])
+        seg_67 = lerp_points(p6, p7, [0.33, 0.66])
+
+        sx, sy, sz = 0.04, 0.04, 0.03
+        tip = 0.04
+
+        hand_offsets_local = torch.tensor(
+            [
+                [ +sx, 0.0, 0.0],
+                [ -sx, 0.0, 0.0],
+                [ 0.0, +sy, 0.0],
+                [ 0.0, -sy, 0.0],
+                [ 0.0, 0.0, +sz],
+                [ 0.0, 0.0, -sz],
+                [ +tip, 0.0, 0.0],  # extra forward tip
+            ],
+            device=self.device,
+            dtype=p7.dtype,
+        )  # (7,3)
+
+        hand_quat = self.robot.data.body_quat_w[:, self.hand_link_idx]  # (N,4) [w,x,y,z] in IsaacLab
+        hand_quat = hand_quat / (hand_quat.norm(dim=-1, keepdim=True) + 1e-8)
+
+        # rotate offsets to world: (N,7,3)
+        offs = hand_offsets_local.unsqueeze(0).expand(self.num_envs, -1, -1)
+        offs_w = self.rotate_vec_by_quat(offs, hand_quat.unsqueeze(1).expand(-1, offs.shape[1], -1))
+        hand_pts = p7.unsqueeze(1) + offs_w  # (N,7,3)
+
+        # ---- stack everything into (N,20,3) ----
+
+        anchors = torch.stack([p2, p4, p6, p7, pg], dim=1)
+
+        probes_w = torch.cat(
+            [
+                anchors,        # (N,5,3)
+                seg_24,         # (N,3,3)
+                seg_46,         # (N,3,3)
+                seg_67,         # (N,2,3)
+                hand_pts,       # (N,7,3)
+            ],
+            dim=1,
+        )
+        return probes_w
+    
+    def compute_min_obstacle_distance(self, robot_probes_vec: torch.Tensor ):
+        obstacle_pos_w = self.obstacle.data.root_pos_w
+
+        dxy = robot_probes_vec[:, :, :2] - obstacle_pos_w[:, None, :2]
+        z_probe  = robot_probes_vec[:, :, 2]
+        z_th = (obstacle_pos_w[:, 2] + 0.5*self.cfg.obstacle_height + self.cfg.safe_margin).unsqueeze(1)
+        dist = torch.sqrt((dxy**2).sum(dim=-1) + 1e-8)
+
+        clearance = dist - (self.cfg.obstacle_radius + self.cfg.link_radius)
+        clearance = torch.where(z_probe <= z_th, clearance, torch.full_like(clearance, self.cfg.safe_margin))
+        min_clearance = torch.min(clearance, dim=-1).values
+        return min_clearance, clearance
+
     def reward_dist(self, dist_vec: torch.Tensor):
         dist = torch.norm(dist_vec, p=2, dim=-1)
         dx = dist_vec[:, 0]
@@ -480,6 +635,28 @@ class ThesisProjectEnv(DirectRLEnv):
         # reward_dist *= reward_dist
         reward_dist = torch.where(dist < 0.05, reward_dist*2.0, reward_dist)
         return reward_dist, dist
+
+    def reward_rot(self, up_axis: torch.Tensor, aux_axis: torch.Tensor, rot_quat: torch.Tensor):
+                # orientation reward
+        fwd_axis           = self.gripper_fwd_axis.expand(self.num_envs, -1)
+        gripper_up_axis    = self.gripper_up_axis.expand(self.num_envs, -1)
+        main_axis     = up_axis.expand(self.num_envs, -1)
+        auxiliary_axis = aux_axis.expand(self.num_envs, -1)
+
+        axis1 = self.rotate_vec_by_quat(fwd_axis, self.robot_grasp_rot) # forward gripper (world)
+        axis2 = self.rotate_vec_by_quat(gripper_up_axis, self.robot_grasp_rot) # gripper up axis (world)
+        axis3 = self.rotate_vec_by_quat(main_axis, rot_quat) # up direction object (world)
+        axis4 = self.rotate_vec_by_quat(auxiliary_axis, rot_quat) # inward direction object (world)
+
+        dot1 = (axis1 * (-axis3)).sum(dim=-1).clamp(-1.0, 1.0)
+        dot2 = (axis2 * axis4).sum(dim=-1).clamp(-1.0, 1.0)
+
+        dot1_p = torch.clamp(dot1, 0.0, 1.0)
+        dot2_p = torch.clamp(dot2, 0.0, 1.0)
+
+        rot_term = 0.5 * (dot1_p**2 + dot2_p**2)
+        # rot_term = 0.5 * (torch.sign(dot1) * dot1**2 + torch.sign(dot2) * dot2**2)
+        return rot_term
 
     def quat_conjugate(self, q: torch.Tensor):
         w, x, y, z = q.unbind(-1)

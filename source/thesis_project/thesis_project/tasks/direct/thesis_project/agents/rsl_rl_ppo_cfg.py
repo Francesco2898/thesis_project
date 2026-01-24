@@ -10,8 +10,8 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 64
-    max_iterations = 2000
+    num_steps_per_env = 128
+    max_iterations = 1750
     save_interval = 100
     experiment_name = "franka_pick_place_direct"
     empirical_normalization = True
@@ -25,9 +25,9 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.0005,
-        num_learning_epochs=8, # 8 prima
-        num_mini_batches=4,
+        entropy_coef=0.001,
+        num_learning_epochs=6, # 8 prima
+        num_mini_batches=8,
         learning_rate=2.0e-4,
         schedule="adaptive",
         gamma=0.99,
