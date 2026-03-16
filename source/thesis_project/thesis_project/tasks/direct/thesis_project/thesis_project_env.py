@@ -34,8 +34,6 @@ class ThesisProjectEnv(DirectRLEnv):
         self.dt = self.cfg.sim.dt * self.cfg.decimation
 
         self.actions = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)   
-
-        self.success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.prev_targ_dist = torch.full((self.num_envs,), float("inf"), device=self.device)
                 # SummaryWriter per TensorBoard
         self.writer = SummaryWriter(log_dir="runs/my_run")
@@ -52,7 +50,6 @@ class ThesisProjectEnv(DirectRLEnv):
         self.ee_offset = 0.03
         self.gripper_fwd_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.gripper_up_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device)
-        self.gripper_close_axis = torch.tensor([1.0, 0.0, 0.0], device=self.device)
         self.object_up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.object_inward_axis = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
 
@@ -61,9 +58,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.gap_finger = torch.zeros((self.num_envs, 1), device=self.device)
         # self.robot_local_grasp_pos = (self.gripper_fwd_axis * 0.1).expand(self.num_envs, 3).clone()
         self.robot_local_grasp_pos = torch.zeros(self.num_envs, 3, device=self.device)
-        self.robot_local_grasp_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 4).clone()
         self.object_local_grasp_pos = torch.tensor([0.0, 0.0, self.cube_half], device=self.device).expand(self.num_envs, 3).clone()
-        self.object_local_grasp_rot = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 4).clone()
         self.object_grasp_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
         self.object_grasp_rot_w = torch.zeros((self.num_envs, 4), device=self.device)
 
@@ -105,8 +100,6 @@ class ThesisProjectEnv(DirectRLEnv):
         self.object_init_z = torch.zeros(self.num_envs, device=self.device)
         self.r_in, self.r_out = 0.025, 0.05
         self.near_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.ori_th = 0.75
-        self.ori_gate = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.success_height = 0.005
 
         self.has_object = torch.zeros(self.num_envs,dtype=torch.bool, device=self.device)
@@ -116,7 +109,18 @@ class ThesisProjectEnv(DirectRLEnv):
         self.ground_up_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device)
         self.ground_inward_axis = torch.tensor([-1.0, 0.0, 0.0], device=self.device)
 
+        self.q_safe = torch.tensor(self.cfg.q_safe_cfg, device=self.device).view(1, -1) 
         self.hit_obstacle_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.shielding_state = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.shielding_activation = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.shielding_released = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.probes_w_buf = torch.zeros(self.num_envs, 20, 3, device=self.device)
+        self.clear_vec_buf = torch.zeros(self.num_envs, 20, device=self.device)
+        self.min_dist_buf = torch.zeros(self.num_envs, device=self.device)
+        self.prev_clear_vec = torch.zeros(self.num_envs, 20, device=self.device)
+        self.min_clear_pred_buf = torch.full((self.num_envs,), self.cfg.safe_margin, device=self.device)
+        self.q_safe_init = torch.tensor(self.cfg.q_safe_cfg, device=self.device, dtype=torch.float32).view(1, -1)
+        self.q_safe_buff = self.q_safe_init.repeat(self.num_envs, 1).clone()
 
 
     def _setup_scene(self):
@@ -125,8 +129,6 @@ class ThesisProjectEnv(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
         print("[DEBUG] Actuator config:")
         print(self.robot.cfg.actuators)
-        # target position in local coordinates
-        self.target_pos = torch.tensor([[0.5, 0.5, self.cfg.table_height + 0.021]], device=self.device).repeat(self.num_envs, 1)
 
         self.place_pos_local = torch.tensor([[-0.5, -0.5, self.cfg.table_height + 0.021]], device=self.device).repeat(self.num_envs, 1)
         
@@ -181,6 +183,7 @@ class ThesisProjectEnv(DirectRLEnv):
         self.ee_marker = VisualizationMarkers(target_marker_cfg)
         self.object_marker = VisualizationMarkers(target_marker_cfg)
         self.place_pos_marker = VisualizationMarkers(target_marker_cfg)
+        self.tip_marker = VisualizationMarkers(target_marker_cfg)
         # add the components to the scene
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["target"] = self.target_obj
@@ -195,20 +198,29 @@ class ThesisProjectEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self.compute_intermediate_values()
         self.actions = actions.clone().clamp(-1.0, 1.0)
+        self.probes_w_buf = self.compute_probe_points_pos()
+        min_clear_now, self.clear_vec_buf = self.compute_min_obstacle_distance(self.probes_w_buf)
+        self.saving_q_safe(min_clear_now)
+        shield_on = min_clear_now < self.cfg.d_in
+        self.update_shield_state(min_clear_now, shield_on)
 
+        mask_reset = self.shielding_released
+        self.robot_dof_targets[mask_reset, :-2] = self.robot.data.joint_pos[mask_reset, :-2]
+
+        mask_rl = ~self.shielding_state
+        env_ids = mask_rl.nonzero(as_tuple=False).squeeze(-1)
         arm_actions = self.actions[..., :-2]
         # arm section action
         targets_arm = self.robot_dof_targets[..., :-2] + self.robot_dof_speed_scales[:-2] * self.dt * arm_actions * self.cfg.action_scale
-        self.robot_dof_targets[..., :-2] = torch.clamp(targets_arm, self.robot_dof_lower_limit[:-2], self.robot_dof_upper_limit[:-2])
-
+        self.robot_dof_targets[mask_rl, :-2] = torch.clamp(targets_arm[mask_rl], self.robot_dof_lower_limit[:-2], self.robot_dof_upper_limit[:-2])
         # gripper_cmd = self.actions[..., -2:].mean(dim=-1, keepdim=True)
         gripper_cmd = self.actions[..., -2:-1].clamp(-1.0, 1.0)
         gripper_cmd = gripper_cmd.expand(-1, 2)
         OPEN = 1.0
         CLOSE = -1.0
         # grasp_phase_ok = (self.near_gate & self.ori_gate)
-
         dist_pick = torch.norm(self.object_grasp_pos_w - self.robot_grasp_pos, dim=-1)
         dist_place = torch.norm(self.place_pos_w - self.target_obj.data.root_pos_w, dim=-1)
         pick_cnd = dist_pick < self.r_in
@@ -217,21 +229,28 @@ class ThesisProjectEnv(DirectRLEnv):
         place_task = self.has_object
         close_gripper = pick_task & pick_cnd
         open_gripper  = (place_task & place_cnd) | (pick_task & (dist_pick > self.r_in))
-
-        self.gripper_state = torch.where(close_gripper, torch.zeros_like(self.gripper_state), self.gripper_state)
-        self.gripper_state = torch.where(open_gripper, torch.ones_like(self.gripper_state), self.gripper_state)
+        gs = self.gripper_state
+        gs[mask_rl] = torch.where(close_gripper[mask_rl], torch.zeros_like(gs[mask_rl]), gs[mask_rl])
+        gs[mask_rl] = torch.where(open_gripper[mask_rl], torch.ones_like(gs[mask_rl]), gs[mask_rl])
+        self.gripper_state = gs
         cmd = torch.where(self.gripper_state.unsqueeze(-1) > 0.5, torch.full_like(gripper_cmd, OPEN), torch.full_like(gripper_cmd, CLOSE))
         # fingers section action
         targets_gripper = self.robot_dof_targets[..., self.finger_joints_ids] + self.robot_dof_speed_scales[self.finger_joints_ids] * self.dt * cmd * self.cfg.action_scale
-        self.robot_dof_targets[..., self.finger_joints_ids] = torch.clamp(targets_gripper, self.robot_dof_lower_limit[self.finger_joints_ids], self.robot_dof_upper_limit[self.finger_joints_ids])
+        #self.robot_dof_targets[mask_rl, self.finger_joints_ids] = torch.clamp(targets_gripper[mask_rl], self.robot_dof_lower_limit[self.finger_joints_ids], self.robot_dof_upper_limit[self.finger_joints_ids])
+        self.robot_dof_targets[env_ids[:, None], self.finger_joints_ids] = torch.clamp(
+            targets_gripper[env_ids],
+            self.robot_dof_lower_limit[self.finger_joints_ids],
+            self.robot_dof_upper_limit[self.finger_joints_ids],
+        )
+
+        env_ids_sh = (~mask_rl).nonzero(as_tuple=False).squeeze(-1)
+        if env_ids_sh.numel() > 0:
+            self.robot_dof_targets[env_ids_sh, :-2] = self.PD_shielding_q(env_ids_sh)
 
     def _apply_action(self) -> None:
 
-        # Torque Control
-        # self.robot.set_joint_effort_target(self.robot_effort_targets, joint_ids=self.dof_idx)
-
         # Position control
-        self.robot.set_joint_position_target(self.robot_dof_targets)
+        self.robot.set_joint_position_target(self.robot_dof_targets) 
 
 
     def _get_observations(self) -> dict:
@@ -266,11 +285,11 @@ class ThesisProjectEnv(DirectRLEnv):
         lift = torch.clamp((z - self.object_init_z), min=0.0, max=self.success_height)
         lift_height = (lift/self.success_height).unsqueeze(-1)
 
-        # to obstacle
-        probes = self.compute_probe_points_pos()
-        _, clear_vec = self.compute_min_obstacle_distance(probes)
+        # recompute probes/clearance ONLY for observation consistency
+        self.probes_w_buf = self.compute_probe_points_pos()
+        _, self.clear_vec_buf = self.compute_min_obstacle_distance(self.probes_w_buf)
         scale = 0.2
-        clear_obs = torch.tanh(clear_vec/scale)
+        clear_obs = torch.tanh(self.clear_vec_buf/scale)
 
         # joint state
         joint_pos = self.robot.data.joint_pos
@@ -291,7 +310,6 @@ class ThesisProjectEnv(DirectRLEnv):
         return observations 
 
     def _get_rewards(self) -> torch.Tensor:
-        self.compute_intermediate_values()
         # to goal
         to_goal = self.place_pos_w - self.target_obj.data.root_pos_w
         # target
@@ -306,17 +324,18 @@ class ThesisProjectEnv(DirectRLEnv):
         goal_err_dist = 0.025
         terminated_task = (goal_dist < goal_err_dist) & (~self.has_object)
 
-        # obstacle hard-stop
-        probes = self.compute_probe_points_pos()
-        min_clear, _ = self.compute_min_obstacle_distance(probes)
-        HARD_PEN_TH = -0.005
-        hit_obstacle = min_clear <= HARD_PEN_TH
-        self.hit_obstacle_buf = hit_obstacle
-        if self.global_step % 100 == 0:
-            self.writer.add_scalar("term/terminated_obs_rate", hit_obstacle.float().mean().item(), self.global_step)
+        # # obstacle hard-stop
+        # probes = self.compute_probe_points_pos()
+        # min_clear, _ = self.compute_min_obstacle_distance(probes)
+        # HARD_PEN_TH = -0.005
+        # hit_obstacle = min_clear <= HARD_PEN_TH
+        # self.hit_obstacle_buf = hit_obstacle
+        # if self.global_step % 100 == 0:
+        #     self.writer.add_scalar("term/terminated_obs_rate", hit_obstacle.float().mean().item(), self.global_step)
 
-        # terminated condition
-        terminated = terminated_task | hit_obstacle
+        # # terminated condition
+        # terminated = terminated_task | hit_obstacle
+        terminated = terminated_task
 
         truncated = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, truncated
@@ -339,10 +358,20 @@ class ThesisProjectEnv(DirectRLEnv):
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self.robot_dof_targets[env_ids] = joint_pos
 
+        # shielding state reset
+        self.shielding_state[env_ids] = 0
+        self.shielding_activation[env_ids] = 0
+        self.shielding_released[env_ids] = 0
+        self.probes_w_buf[env_ids] = 0
+        self.clear_vec_buf[env_ids] = 0
+        self.min_dist_buf[env_ids] = self.cfg.safe_margin
+        self.prev_clear_vec[env_ids] = self.cfg.safe_margin
+        self.min_clear_pred_buf[env_ids] = self.cfg.safe_margin
+        self.q_safe_buff[env_ids] = self.q_safe_init.repeat(len(env_ids), 1) #reset the q_safe buffer
+
         # target reset
         # local position wrt the env
         new_target_pos_local = sample_uniform(self.box1_min, self.box1_max, (len(env_ids), 3), device=self.device)
-        self.target_pos[env_ids] = new_target_pos_local
 
         new_target_pos_w = new_target_pos_local + self.scene.env_origins[env_ids]
         new_object_rot_w = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
@@ -369,15 +398,6 @@ class ThesisProjectEnv(DirectRLEnv):
         self.hold_steps[env_ids] = 0
         self.has_object[env_ids] = False
         self.prev_has_object[env_ids] = False
-
-    def get_env_local_pos(self, env_pos: torch.Tensor, world_pos: torch.Tensor, world_quat: torch.Tensor | None = None):
-        # compute position in environment local coordinate system
-        local_pose = world_pos - env_pos
-        if world_quat == None: # interested only in the position
-            return local_pose
-        else: # interested also in the orientation
-            qx, qy, qz, qw = world_quat.unbind(-1)
-            return torch.stack([local_pose[:, 0], local_pose[:, 1], local_pose[:, 2], qw, qx, qy, qz],dim=-1)
         
     def compute_rewards(self, actions,
                         to_goal: torch.Tensor,
@@ -453,20 +473,19 @@ class ThesisProjectEnv(DirectRLEnv):
         penalty_action = self.cfg.action_penalty_scale * penalty_action
 
         # near collision penalty
-        probes = self.compute_probe_points_pos()
-        min_clear, _ = self.compute_min_obstacle_distance(probes)
+        min_clear = self.clear_vec_buf.min(dim=-1).values
 
         # w_obs = torch.clamp((1.5*self.cfg.safe_margin - min_clear)/1.5*self.cfg.safe_margin, 0.0, 1.0)
         # penalty_obstacle = (self.cfg.safe_margin/(self.cfg.safe_margin + min_clear))**4
         # penalty_obstacle = w_obs * self.cfg.obstacle_penalty_scale * penalty_obstacle
-        viol = torch.clamp(self.cfg.safe_margin - min_clear, min=0.0)
+        viol = torch.clamp(self.cfg.d_out - min_clear, min=0.0)
         penalty_obstacle = self.cfg.obstacle_penalty_scale * viol**2
 
-        HARD_TH = -0.005  # same as get_dones
-        hit_obstacle = min_clear < HARD_TH
+        # HARD_TH = -0.005  # same as get_dones
+        # hit_obstacle = min_clear < HARD_TH
 
-        terminal_collision_pen = self.cfg.terminal_collision_penalty
-        penalty_terminal = terminal_collision_pen * hit_obstacle.float()
+        sh_activ_pen = self.cfg.sh_activ_penalty
+        penalty_sh_act = sh_activ_pen * self.shielding_activation.float()
 
         # compute reward
         reward = (reward_reach
@@ -477,7 +496,7 @@ class ThesisProjectEnv(DirectRLEnv):
                   + reward_lift
                   - penalty_action
                   - penalty_obstacle
-                  - penalty_terminal)
+                  - penalty_sh_act)
 
         if self.global_step % 100 == 0:
             self.writer.add_scalar("geom/reach_dist_mean", targ_dist.mean().item(), self.global_step)
@@ -496,9 +515,57 @@ class ThesisProjectEnv(DirectRLEnv):
             self.writer.add_scalar("reward/rot_place", reward_rot_place.mean().item(), self.global_step)
             self.writer.add_scalar("reward/lift", reward_lift.mean().item(), self.global_step)
             self.writer.add_scalar("reward/penalty_obstacle", penalty_obstacle.mean().item(), self.global_step)
-            self.writer.add_scalar("reward/penalty_terminal", penalty_terminal.mean().item(), self.global_step)
-            # self.writer.add_scalar("reward/grasp", reward_grasp.mean().item(), self.global_step)
-    
+            self.writer.add_scalar("reward/penalty_terminal", penalty_sh_act.mean().item(), self.global_step)
+
+            # Shielding diagnostic
+            # q_err = torch.norm(self.q_safe_buff - self.robot.data.joint_pos[:, :-2], dim=-1)
+            # dq_norm = torch.norm(self.robot.data.joint_vel[:, :-2], dim=-1)
+
+            # danger_rate = (min_clear < self.cfg.d_in).float().mean().item()
+            # hyst_rate = ((min_clear >= self.cfg.d_in) & (min_clear <= self.cfg.d_out)).float().mean().item()
+            # safe_rate = (min_clear > self.cfg.d_out).float().mean().item()
+
+            # self.writer.add_scalar("shield/qsafe_err_mean",q_err.float().mean(), self.global_step)
+            # self.writer.add_scalar("shield/dq_norm_mean", dq_norm.float().mean(), self.global_step)
+            # self.writer.add_scalar("shield/zone_danger_rate", danger_rate, self.global_step)
+            # self.writer.add_scalar("shield/zone_hysteresis_rate", hyst_rate, self.global_step)
+            # self.writer.add_scalar("shield/zone_safe_rate", safe_rate, self.global_step)
+
+            shield_mask = self.shielding_state
+            if shield_mask.any():
+                env_ids_sh = shield_mask.nonzero(as_tuple=False).squeeze(-1)
+                # current arm state
+                q_now = self.robot.data.joint_pos[env_ids_sh, :-2]
+                dq_now = self.robot.data.joint_vel[env_ids_sh, :-2]
+                # current shield target
+                q_sh = self.robot_dof_targets[env_ids_sh, :-2]
+                
+                qsafe_err_active = torch.norm(self.q_safe_buff[env_ids_sh] - q_now, dim=-1)
+                dq_active = torch.norm(dq_now, dim=-1)
+                q_step_active = torch.norm(q_sh - q_now, dim=-1)
+                min_clear_active = min_clear[env_ids_sh]
+                self.writer.add_scalar("shield_active/qsafe_err_mean",qsafe_err_active.float().mean(), self.global_step)
+                self.writer.add_scalar("shield_active/qsafe_err_max",qsafe_err_active.float().max(), self.global_step)
+                self.writer.add_scalar("shield_active/min_clear_mean",min_clear_active.float().mean(), self.global_step)
+                self.writer.add_scalar("shield_active/min_clear_min",min_clear_active.float().min(), self.global_step)
+                self.writer.add_scalar("shield_active/dq_mean",dq_active.float().mean(), self.global_step)
+                self.writer.add_scalar("shield_active/dq_max",dq_active.float().max(), self.global_step)
+                self.writer.add_scalar("shield_active/qstep_mean",q_step_active.float().mean(), self.global_step)
+                self.writer.add_scalar("shield_active/qstep_max",q_step_active.float().max(), self.global_step)
+                self.writer.add_scalar("shield_active/env_count", float(env_ids_sh.numel()), self.global_step)
+            else:
+                # keep curves continuous
+                self.writer.add_scalar("shield_active/qsafe_err_mean", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/qsafe_err_max", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/min_clear_mean", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/min_clear_min", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/dq_mean", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/dq_max", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/qstep_mean", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/qstep_max", 0.0, self.global_step)
+                self.writer.add_scalar("shield_active/env_count", 0.0, self.global_step)
+
+
         return reward
     
     def compute_intermediate_values(self, env_ids : torch.Tensor | None = None ):
@@ -565,7 +632,7 @@ class ThesisProjectEnv(DirectRLEnv):
         seg_67 = lerp_points(p6, p7, [0.33, 0.66])
 
         sx, sy, sz = 0.04, 0.04, 0.03
-        tip = 0.04
+        tip = 0.22
 
         hand_offsets_local = torch.tensor(
             [
@@ -575,7 +642,7 @@ class ThesisProjectEnv(DirectRLEnv):
                 [ 0.0, -sy, 0.0],
                 [ 0.0, 0.0, +sz],
                 [ 0.0, 0.0, -sz],
-                [ +tip, 0.0, 0.0],  # extra forward tip
+                [ 0.0, 0.0, +tip],  # extra forward tip
             ],
             device=self.device,
             dtype=p7.dtype,
@@ -603,20 +670,126 @@ class ThesisProjectEnv(DirectRLEnv):
             ],
             dim=1,
         )
+        self.tip_marker.visualize(hand_pts[:, -1, :].detach().cpu())
         return probes_w
     
-    def compute_min_obstacle_distance(self, robot_probes_vec: torch.Tensor ):
-        obstacle_pos_w = self.obstacle.data.root_pos_w
+    # def compute_min_obstacle_distance(self, robot_probes_vec: torch.Tensor ):
+    #     obstacle_pos_w = self.obstacle.data.root_pos_w
 
-        dxy = robot_probes_vec[:, :, :2] - obstacle_pos_w[:, None, :2]
-        z_probe  = robot_probes_vec[:, :, 2]
-        z_th = (obstacle_pos_w[:, 2] + 0.5*self.cfg.obstacle_height + self.cfg.safe_margin).unsqueeze(1)
-        dist = torch.sqrt((dxy**2).sum(dim=-1) + 1e-8)
+    #     dxy = robot_probes_vec[:, :, :2] - obstacle_pos_w[:, None, :2]
+    #     z_probe  = robot_probes_vec[:, :, 2]
+    #     z_th = (obstacle_pos_w[:, 2] + 0.5*self.cfg.obstacle_height + self.cfg.safe_margin).unsqueeze(1)
+    #     dist = torch.sqrt((dxy**2).sum(dim=-1) + 1e-8)
 
-        clearance = dist - (self.cfg.obstacle_radius + self.cfg.link_radius)
-        clearance = torch.where(z_probe <= z_th, clearance, torch.full_like(clearance, self.cfg.safe_margin))
-        min_clearance = torch.min(clearance, dim=-1).values
+    #     clearance = dist - (self.cfg.obstacle_radius + self.cfg.link_radius)
+    #     clearance = torch.where(z_probe <= z_th, clearance, torch.full_like(clearance, self.cfg.safe_margin))
+    #     min_clearance = torch.min(clearance, dim=-1).values
+    #     return min_clearance, clearance
+    
+    def compute_min_obstacle_distance(self, robot_probes_vec: torch.Tensor):
+        """
+        Compute clearance between robot probe points and a finite vertical cylinder.
+        Clearance > 0  : separated
+        Clearance = 0  : touching (according to the probe/link-radius model)
+        Clearance < 0  : penetration / unsafe overlap
+
+        robot_probes_vec: (N, P, 3)
+        returns:
+            min_clearance: (N,)
+            clearance:     (N, P)
+        """
+        obstacle_pos_w = self.obstacle.data.root_pos_w  # (N, 3)
+
+        # Cylinder geometry
+        cyl_radius = self.cfg.obstacle_radius
+        link_radius = self.cfg.link_radius
+        cyl_half_h = 0.5 * self.cfg.obstacle_height
+
+        cx = obstacle_pos_w[:, 0].unsqueeze(1)  # (N,1)
+        cy = obstacle_pos_w[:, 1].unsqueeze(1)
+        cz = obstacle_pos_w[:, 2].unsqueeze(1)
+
+        px = robot_probes_vec[:, :, 0]
+        py = robot_probes_vec[:, :, 1]
+        pz = robot_probes_vec[:, :, 2]
+
+        # Radial distance in XY from cylinder axis
+        dx = px - cx
+        dy = py - cy
+        radial_dist = torch.sqrt(dx * dx + dy * dy + 1e-8)  # (N,P)
+
+        # Signed radial distance from infinite cylinder surface
+        radial_out = radial_dist - cyl_radius  # >0 outside, <0 inside projected radius
+
+        # Vertical distance from finite cylinder slab [-half_h, +half_h]
+        dz = torch.abs(pz - cz) - cyl_half_h   # >0 above/below caps, <0 within height
+
+        # Distance to finite cylinder surface (continuous)
+        #
+        # Standard SDF-style construction for a finite vertical cylinder:
+        # outside both radially and vertically -> euclidean distance to edge/corner
+        # outside radially only -> radial distance
+        # outside vertically only -> vertical distance
+        # inside both -> penetration = max(radial_out, dz) <= 0
+        outside_radial = torch.clamp(radial_out, min=0.0)
+        outside_vertical = torch.clamp(dz, min=0.0)
+
+        outside_dist = torch.sqrt(outside_radial**2 + outside_vertical**2 + 1e-8)
+        inside_dist = torch.clamp(torch.maximum(radial_out, dz), max=0.0)
+
+        sdf_cylinder = outside_dist + inside_dist  # signed distance to cylinder surface
+
+        # Clearance including link/probe thickness
+        clearance = sdf_cylinder - link_radius
+
+        min_clearance = clearance.min(dim=-1).values
         return min_clearance, clearance
+
+    def PD_shielding_q(self, env_ids: torch.Tensor) -> torch.Tensor:
+        q = self.robot.data.joint_pos[env_ids, :-2]
+        dq = self.robot.data.joint_vel[env_ids, :-2]
+
+        q_err = self.q_safe_buff[env_ids] - q
+        v_sh = self.cfg.K_p * q_err - self.cfg.K_d * dq
+
+        q_sh = q + self.dt * v_sh
+
+        # q_sh = self.q_safe_buff[env_ids]
+
+        q_sh = torch.clamp(q_sh,
+                           self.robot_dof_lower_limit[:-2],
+                           self.robot_dof_upper_limit[:-2]
+                           )
+        return q_sh
+    
+    def saving_q_safe(self, min_dist: torch.Tensor) -> None:
+        q = self.robot.data.joint_pos[:, :-2]
+        dq = self.robot.data.joint_vel[:, :-2]
+
+        pos_ok = min_dist > self.cfg.safe_margin
+        vel_ok = torch.norm(dq, dim=-1) < self.cfg.safe_eps_dq
+        not_shielding = ~self.shielding_state
+
+        save_mask = pos_ok# (num_envs,)
+        save_mask = save_mask.unsqueeze(-1)         # (nem_envs, 1)
+        self.q_safe_buff = torch.where(save_mask, q, self.q_safe_buff)
+    
+    def update_shield_state(self, min_clear_now: torch.Tensor, shield_on: torch.Tensor) -> None:
+        q = self.robot.data.joint_pos[:, :-2]
+        dq = self.robot.data.joint_vel[:, :-2]
+
+        pos_ok = torch.norm(self.q_safe_buff - q, dim=-1) < self.cfg.safe_eps_q
+        vel_ok = torch.norm(dq, dim=-1) < self.cfg.safe_eps_dq
+        clear_ok = min_clear_now > self.cfg.d_out
+
+        # safe = pos_ok & vel_ok & clear_ok
+        safe = clear_ok & pos_ok & vel_ok
+
+        new_state = torch.where(self.shielding_state, ~safe, shield_on)
+        self.shielding_activation = (~self.shielding_state) & new_state
+        self.shielding_released = (self.shielding_state) & (~new_state)
+        self.shielding_state = new_state
+
 
     def reward_dist(self, dist_vec: torch.Tensor):
         dist = torch.norm(dist_vec, p=2, dim=-1)

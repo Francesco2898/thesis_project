@@ -31,8 +31,11 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     table_thickness = 0.05     # spessore del tavolo in metri
     obstacle_height = 0.2
     obstacle_radius = 0.05
-    safe_margin = 0.12
-    link_radius =0.04
+    # shielding thresholds
+    d_in = 0.05
+    d_out = d_in + 0.04
+    safe_margin = 0.1
+    link_radius =0.05
     clip_dist = 0.1
     table_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Table",
@@ -59,15 +62,21 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
+    # definition of the safe condition for shielding
+    q_safe_cfg = [0.0, -0.569, 0.0, -2.350, 0.0, 2.500, 0.741]
+    safe_eps_q = 0.03
+    safe_eps_dq = 0.08
+    K_p = 50.0
+    K_d = 0.1
     goal_success_dist = 0.02
     
-    action_scale = 1.0
+    action_scale = 0.7
     dof_velocity_scale = 0.1
     action_penalty_scale = 0.02
     rot_reward_scale = 1.0
-    lift_reward_scale = 1.2
+    lift_reward_scale = 1.25
     grasp_reward_scale = 3.0
     goal_reward_scale = 2.5
     success_reward_scale = 3.0
-    obstacle_penalty_scale = 10.0
-    terminal_collision_penalty = 7.0
+    obstacle_penalty_scale = 5.0
+    sh_activ_penalty = 0.0 #3.0 con policy principale
