@@ -27,17 +27,23 @@ class SafetyEnv(DirectRLEnv):
         self.global_step = 0
         self.writer = SummaryWriter(log_dir="runs/policy2")
 
+        self.arm_joint_names = self.robot.joint_names[:-2]
+        # self.arm_ids, _ = self.robot.find_joints(self.arm_joint_names, preserve_order=True)
+        self.arm_ids = torch.arange(self.robot.num_joints - 2, device=self.device, dtype=torch.long)
+
         self.actions = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
-        self.robot_dof_lower_limit = self.robot.data.joint_pos_limits[0, :, 0].to(device=self.device)
-        self.robot_dof_upper_limit = self.robot.data.joint_pos_limits[0, :, 1].to(device=self.device)
+        self.robot_dof_lower_limit = self.robot.data.soft_joint_pos_limits[0, :, 0].to(device=self.device)
+        self.robot_dof_upper_limit = self.robot.data.soft_joint_pos_limits[0, :, 1].to(device=self.device)
+        self.joint_range = torch.clamp(self.robot_dof_upper_limit - self.robot_dof_lower_limit, min=1e-6)
         self.q_goal = sample_uniform(
-            self.robot_dof_lower_limit,
-            self.robot_dof_upper_limit,
-            (self.num_envs, self.robot.num_joints),
+            self.robot_dof_lower_limit[self.arm_ids],
+            self.robot_dof_upper_limit[self.arm_ids],
+            (self.num_envs, len(self.arm_ids)),
             device=self.device
         )
+        self.prev_q_err = torch.zeros((self.num_envs, len(self.arm_ids)), device=self.device)
         self.tau_max = self.robot.data.joint_effort_limits.to(device=self.device)
-        self.tau_cmd = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
+        self.tau_cmd = torch.zeros((self.num_envs, len(self.arm_ids)), device=self.device)
         # robot link indices
         self.hand_link_idx = self.robot.find_bodies("panda_link7")[0][0]
         self.frame_link_2_idx = self.robot.find_bodies("panda_link2")[0][0]
@@ -84,47 +90,64 @@ class SafetyEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
-        tau_scale = 0.5
-        self.tau_cmd = self.actions * self.tau_max * tau_scale
-        self.tau_cmd = torch.clamp(self.tau_cmd, -self.tau_max, self.tau_max)
+        self.actions = self.actions[:, self.arm_ids]
+        tau_scale = 0.2
+        self.tau_cmd = self.actions * self.tau_max[0, self.arm_ids] * tau_scale
+        self.tau_cmd = torch.clamp(self.tau_cmd, -self.tau_max[0, self.arm_ids], self.tau_max[0, self.arm_ids])
 
     
     def _apply_action(self) -> None:
         # Torque control
-        self.robot.set_joint_effort_target(self.tau_cmd)
+        self.robot.set_joint_effort_target(self.tau_cmd, joint_ids=self.arm_ids)
     
     def _get_observations(self):
-        joint_pos = self.robot.data.joint_pos
-        joint_vel = self.robot.data.joint_vel
-        joint_pos_norm = 2.0 * (joint_pos - self.robot_dof_lower_limit)/(self.robot_dof_upper_limit - self.robot_dof_lower_limit) - 1.0
+        joint_pos = self.robot.data.joint_pos[:, self.arm_ids]
+        joint_vel = self.robot.data.joint_vel[:, self.arm_ids]
+        joint_pos_norm = 2.0 * (joint_pos - self.robot_dof_lower_limit[self.arm_ids])/(self.robot_dof_upper_limit[self.arm_ids] - self.robot_dof_lower_limit[self.arm_ids]) - 1.0
         joint_vel_norm = joint_vel * self.cfg.dof_velocity_scale
-        q_err = self.q_goal - joint_pos
+        q_err_norm = (self.q_goal - joint_pos)/self.joint_range[self.arm_ids]
 
         obs = torch.hstack((joint_pos_norm,
                             joint_vel_norm,
-                            q_err,
+                            q_err_norm,
         ))
         obs = torch.nan_to_num(obs, nan=0, posinf=1e6, neginf=-1e6)
         observations = {"policy": torch.clamp(obs, -5.0, 5.0)}
         return observations
     
     def _get_rewards(self):
-        joint_pos = self.robot.data.joint_pos
-        q_err = torch.abs(self.q_goal - joint_pos)
-        reward_joint = 1.0/(1.0 + (torch.sum(q_err, dim=-1))**2)
-        reward_joint = self.cfg.joint_reward_scale * reward_joint
+        joint_pos = self.robot.data.joint_pos[:, self.arm_ids]
+        q_err_norm = (self.q_goal - joint_pos)/self.joint_range[self.arm_ids]
+        # q_dist = torch.norm(q_err_norm, dim=-1)
+        q_err = torch.norm(q_err_norm, dim=-1)
+        prev_q_err = torch.norm(self.prev_q_err, dim=-1)
+        reward_progress = (prev_q_err - q_err) * 10.0
+
+        q_abs = torch.abs(q_err_norm)
+        q_worst = torch.max(q_abs, dim=-1)
+        mean_sq = torch.mean(q_abs**2, dim=-1)
+        reward_joint = torch.exp(-10.0 * mean_sq)
+        # reward_for_joint = 1.0/(1.0 + (q_abs)**2)
+        # reward_for_joint = torch.where(q_dist < 0.2, 2.0 * reward_for_joint, reward_for_joint)
+        # reward_joint = torch.sum(reward_for_joint, dim=-1)*0.1
 
         # actions penalty
         penalty_action = torch.sum(self.actions**2, dim=-1)
         penalty_action = penalty_action * self.cfg.action_penalty_scale
+        # joint_vel = self.robot.data.joint_vel
+        # penalty_action = torch.norm(joint_vel, dim=-1) * self.cfg.action_penalty_scale
 
         reward = (reward_joint
                   - penalty_action)
         if self.global_step % 100 == 0:
-            self.writer.add_scalar("geom/q_err", q_err.mean().item(), self.global_step)
+            self.writer.add_scalar("geom/q_dist", q_err.mean().item(), self.global_step)
+            for i in range(len(self.arm_ids)):
+                self.writer.add_scalar(f"geom/q_err_norm_joint_{i}", q_err_norm[:, i].abs().mean().item(), self.global_step)
             self.writer.add_scalar("reward/reward_joint", reward_joint.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/reward_progress", reward_progress.mean().item(), self.global_step)
             self.writer.add_scalar("reward/total", reward.mean().item(), self.global_step)
         self.global_step += 1
+        self.prev_q_err.copy_(q_err_norm)
         return reward
     
     def _get_dones(self):
@@ -145,15 +168,15 @@ class SafetyEnv(DirectRLEnv):
         )
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limit, self.robot_dof_upper_limit)
         joint_vel = torch.zeros_like(joint_pos)
-        self.robot.set_joint_position_target(joint_pos, env_ids=env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self.tau_cmd[env_ids] = 0.0
         self.q_goal[env_ids] = sample_uniform(
-            self.robot_dof_lower_limit,
-            self.robot_dof_upper_limit,
-            (len(env_ids), self.robot.num_joints),
+            self.robot_dof_lower_limit[self.arm_ids],
+            self.robot_dof_upper_limit[self.arm_ids],
+            (len(env_ids), len(self.arm_ids)),
             device=self.device
         )
+        self.prev_q_err[env_ids] = (self.q_goal[env_ids] - joint_pos[:, self.arm_ids])/self.joint_range[self.arm_ids]
 
 
     # Ausiliary functions

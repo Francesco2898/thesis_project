@@ -10,13 +10,13 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 128
+    num_steps_per_env = 32
     max_iterations = 1750
     save_interval = 100
     experiment_name = "franka_backup_policy"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8, # 1 default
+        init_noise_std=0.5, # 1 default
         actor_hidden_dims=[128, 64],
         critic_hidden_dims=[128, 64],
         activation="elu",
@@ -25,7 +25,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.001,
+        entropy_coef=0.005,
         num_learning_epochs=6, # 8 prima
         num_mini_batches=8,
         learning_rate=2.0e-4,

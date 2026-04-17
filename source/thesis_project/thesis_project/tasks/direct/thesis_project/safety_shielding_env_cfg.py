@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from thesis_project.robots.franka import FRANKA_PANDA_CFG
+from thesis_project.robots.franka_2 import FRANKA_PANDA_TORQUE_CFG
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
@@ -14,6 +14,11 @@ from isaaclab.utils import configclass
 from isaaclab.assets import RigidObjectCfg, RigidObject
 from isaaclab.sim.spawners.from_files import UsdFileCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+import os
+
+# URDF_PATH = r"C:\Users\franc\miniconda3\envs\env_isaaclab\Lib\site-packages\isaacsim\extscache\isaacsim.asset.importer.urdf-2.3.10+106.4.0.wx64.r.cp310\data\urdf\robots\franka_description\robots\panda_arm_hand.urdf"
+# print("Urdf_path: ", URDF_PATH)
+# print("State: ", os.path.exists(URDF_PATH))
 
 @configclass
 class SafetyEnvCfg(DirectRLEnvCfg):
@@ -21,12 +26,13 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10
     # - space definition
-    action_space = 9
-    observation_space = 27
+    action_space = 7
+    observation_space = 21
     state_space = 0
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/60, render_interval=decimation)
 
+    urdf_path = r"C:\Users\franc\miniconda3\envs\env_isaaclab\Lib\site-packages\isaacsim\extscache\isaacsim.asset.importer.urdf-2.3.10+106.4.0.wx64.r.cp310\data\urdf\robots\franka_description\robots\panda_arm_hand.urdf"
     table_height = 0.75        # altezza del piano (top) in metri
     table_thickness = 0.05     # spessore del tavolo in metri
     obstacle_height = 0.2
@@ -53,7 +59,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
         ),
     )
     #robot(s)
-    robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot_cfg: ArticulationCfg = FRANKA_PANDA_TORQUE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     robot_cfg.init_state.pos = (0.0, 0.0, table_height)
     robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
     robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
@@ -72,7 +78,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     
     action_scale = 0.7
     dof_velocity_scale = 0.1
-    action_penalty_scale = 0.02
+    action_penalty_scale = 0.01
     joint_reward_scale = 1.0
     lift_reward_scale = 1.25
     grasp_reward_scale = 3.0
