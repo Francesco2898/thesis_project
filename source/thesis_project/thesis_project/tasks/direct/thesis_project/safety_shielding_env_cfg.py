@@ -27,7 +27,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     episode_length_s = 10
     # - space definition
     action_space = 7
-    observation_space = 21
+    observation_space = 41
     state_space = 0
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1/60, render_interval=decimation)
@@ -77,8 +77,8 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     goal_success_dist = 0.02
     
     action_scale = 0.7
-    dof_velocity_scale = 0.1
-    action_penalty_scale = 0.01
+    dof_velocity_scale = 0.5
+    action_penalty_scale = 0.02
     joint_reward_scale = 1.0
     lift_reward_scale = 1.25
     grasp_reward_scale = 3.0
