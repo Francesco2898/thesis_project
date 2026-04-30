@@ -55,6 +55,8 @@ class SafetyEnv(DirectRLEnv):
             [self.frame_link_2_idx, self.frame_link_4_idx, self.frame_link_6_idx, self.hand_link_idx],
             device=self.device, dtype=torch.long
         )
+        self.robot_dof_targets = torch.zeros((self.num_envs, self.robot.num_joints), device=self.device)
+        self.robot_dof_speed_scales = torch.ones_like(self.robot_dof_lower_limit)* 0.5
         self.robot_grasp_pos = torch.zeros((self.num_envs, 3), device=self.device)
         self.ee_offset = 0.03
         self.gap_finger = torch.zeros((self.num_envs, 1), device=self.device)
@@ -100,15 +102,18 @@ class SafetyEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
         self.actions = self.actions[:, self.arm_ids]
-        tau_scale = 0.2
-        self.tau_cmd = self.actions * self.tau_max[0, self.arm_ids] * tau_scale
-        self.tau_cmd = torch.clamp(self.tau_cmd, -self.tau_max[0, self.arm_ids], self.tau_max[0, self.arm_ids])
-
+        # tau_scale = 0.2
+        # self.tau_cmd = self.actions * self.tau_max[0, self.arm_ids] * tau_scale
+        # self.tau_cmd = torch.clamp(self.tau_cmd, -self.tau_max[0, self.arm_ids], self.tau_max[0, self.arm_ids])
+        targets_arm = self.robot_dof_targets[:, self.arm_ids] + self.robot_dof_speed_scales[self.arm_ids] * self.dt * self.actions * self.cfg.action_scale
+        self.robot_dof_targets[:, self.arm_ids] = torch.clamp(targets_arm, self.robot_dof_lower_limit[self.arm_ids], self.robot_dof_upper_limit[self.arm_ids])
     
     def _apply_action(self) -> None:
         # Torque control
-        self.robot.set_joint_effort_target(self.tau_cmd, joint_ids=self.arm_ids)
-    
+        # self.robot.set_joint_effort_target(self.tau_cmd, joint_ids=self.arm_ids)
+        self.robot.set_joint_position_target(self.robot_dof_targets[:, self.arm_ids], joint_ids=self.arm_ids)
+
+
     def _get_observations(self):
         joint_pos = self.robot.data.joint_pos[:, self.arm_ids]
         joint_vel = self.robot.data.joint_vel[:, self.arm_ids]
@@ -159,11 +164,11 @@ class SafetyEnv(DirectRLEnv):
         penalty_action = penalty_action * self.cfg.action_penalty_scale
         # joint_velocity penalty
         near_goal = (q_err <= 0.15).float()
-        penalty_dq = (0.0005 + 0.01 * near_goal) * torch.sum(dq**2, dim=-1)
+        penalty_dq = (0.0005 + 0.002 * near_goal) * torch.sum(dq**2, dim=-1)
         # obstacle penalty
         d_warn = 0.05
         penalty_obs = torch.relu(d_warn - self.clear_vec_buf)**2
-        penalty_obs = torch.sum(penalty_obs, dim=-1)
+        penalty_obs = torch.sum(penalty_obs, dim=-1) * 50.0
 
         reward = (reward_q
                   - penalty_dq
@@ -194,22 +199,40 @@ class SafetyEnv(DirectRLEnv):
             env_ids = self.robot._ALL_INDICES
         super()._reset_idx(env_ids)
 
+        q_goal_pin = torch.tensor(
+            [0.2563881650718601, 0.4500463124520452, 0.3697866797164865, -1.9843721466291926, -0.23336613369861603, 2.393948550913406, 1.5501551389393688],
+            device=self.device,
+            dtype=torch.float32,
+        )
+        # joint_pos = q_goal_pin.unsqueeze(0).expand(len(env_ids), -1)
         joint_pos = self.robot.data.default_joint_pos[env_ids] + sample_uniform(
-            -0.125,
-            0.125,
+            -self.cfg.delta_q,
+            self.cfg.delta_q,
             (len(env_ids), self.robot.num_joints),
             device= self.device,
         )
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limit, self.robot_dof_upper_limit)
         joint_vel = torch.zeros_like(joint_pos)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+        self.robot_dof_targets[env_ids] = joint_pos
         self.tau_cmd[env_ids] = 0.0
-        self.q_goal[env_ids] = sample_uniform(
-            self.robot_dof_lower_limit[self.arm_ids],
-            self.robot_dof_upper_limit[self.arm_ids],
-            (len(env_ids), len(self.arm_ids)),
-            device=self.device
-        )
+        # self.q_goal[env_ids] = sample_uniform(
+        #     self.robot_dof_lower_limit[self.arm_ids],
+        #     self.robot_dof_upper_limit[self.arm_ids],
+        #     (len(env_ids), len(self.arm_ids)),
+        #     device=self.device
+        # )
+        # self.q_goal[env_ids] = joint_pos[:, self.arm_ids] + sample_uniform(
+        #                                         -self.cfg.delta_q,
+        #                                          self.cfg.delta_q,    
+        #                                          (len(env_ids), len(self.arm_ids)),
+        #                                          device=self.device
+        #                                          )
+        self.q_goal[env_ids] = q_goal_pin.unsqueeze(0).expand(len(env_ids), -1)
+        self.q_goal[env_ids] = torch.clamp(self.q_goal[env_ids],
+                                           self.robot_dof_lower_limit[self.arm_ids],
+                                           self.robot_dof_upper_limit[self.arm_ids]
+                                           )
         self.prev_q_err[env_ids] = (self.q_goal[env_ids] - joint_pos[:, self.arm_ids])/self.joint_range[self.arm_ids]
         self.probes_w_buf[env_ids] = 0
         self.clear_vec_buf[env_ids] = 0

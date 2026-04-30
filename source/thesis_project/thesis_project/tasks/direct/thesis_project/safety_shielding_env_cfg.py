@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from thesis_project.robots.franka_2 import FRANKA_PANDA_TORQUE_CFG
+from thesis_project.robots.franka import FRANKA_PANDA_CFG
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg
@@ -59,18 +59,27 @@ class SafetyEnvCfg(DirectRLEnvCfg):
         ),
     )
     #robot(s)
-    robot_cfg: ArticulationCfg = FRANKA_PANDA_TORQUE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     robot_cfg.init_state.pos = (0.0, 0.0, table_height)
-    robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
-    robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
-    #scene
+    # robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
+    # robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
+    robot_cfg.init_state.joint_pos = {
+        "panda_joint1": -0.27689978081008815,
+        "panda_joint2":  -0.5340115896900678,
+        "panda_joint3":  -0.4743214197617522,
+        "panda_joint4": -2.930253809731531,
+        "panda_joint5": -0.35696643262928796,
+        "panda_joint6":  2.413823638632636, 
+        "panda_joint7": 0.3639460666111401,
+        "panda_finger_joint1": 0.04,
+        "panda_finger_joint2": 0.04,
+    }
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4, replicate_physics=True)
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
-    # definition of the safe condition for shielding
-    q_safe_cfg = [0.0, -0.569, 0.0, -2.350, 0.0, 2.500, 0.741]
-    safe_eps_q = 0.03
+    # q_init = [-0.7103565501999577, 0.29044340028667026, 0.22102578761873362, -0.08273362860618419, -0.17377165533718392, 0.3715945279443849, -0.6604328007789008, 0.0, 0.0]
+    delta_q = 0.125
     safe_eps_dq = 0.08
     K_p = 50.0
     K_d = 0.1
