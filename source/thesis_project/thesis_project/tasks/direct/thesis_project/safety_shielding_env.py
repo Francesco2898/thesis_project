@@ -71,29 +71,33 @@ class SafetyEnv(DirectRLEnv):
         self.table = RigidObject(self.cfg.table_cfg)
 
         # Obstacle configuration
-        obstacle_cfg = RigidObjectCfg(
-            prim_path="/World/envs/env_.*/Obstacle",
-            spawn=sim_utils.CylinderCfg(
-                radius=self.cfg.obstacle_radius,
-                height=self.cfg.obstacle_height,
-                axis="Z",
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
-                mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
-                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.6, 1.0)),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(
-                pos= (0.4, 0.0, self.cfg.table_height + 0.5*self.cfg.obstacle_height),
-                rot= (1.0, 0.0, 0.0, 0.0),
-            ),
-            debug_vis=True
-        )
-        self.obstacle = RigidObject(obstacle_cfg)
-
+        def obstacle_cfg( name : str, pos : tuple[float, float, float]):
+            return RigidObjectCfg(
+                prim_path=f"/World/envs/env_.*/{name}",
+                spawn=sim_utils.CylinderCfg(
+                    radius=self.cfg.obstacle_radius,
+                    height=self.cfg.obstacle_height,
+                    axis="Z",
+                    rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
+                    mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
+                    collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
+                    visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.6, 1.0)),
+                ),
+                init_state=RigidObjectCfg.InitialStateCfg(
+                    pos= pos,
+                    rot= (1.0, 0.0, 0.0, 0.0),
+                ),
+                debug_vis=True
+            )
+        self.obstacle1 = RigidObject(obstacle_cfg("Obstacle1", (0.4, 0.0, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
+        self.obstacle2 = RigidObject(obstacle_cfg("Obstacle2", (0.6, -0.25, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
+        self.obstacle3 = RigidObject(obstacle_cfg("Obstacle3", (0.6, 0.25, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
         # adding the components to the scene
         self.scene.articulations["robot"] = self.robot
         self.scene.rigid_objects["table"] = self.table
-        self.scene.rigid_objects["obstacle"] = self.obstacle
+        self.scene.rigid_objects["obstacle1"] = self.obstacle1
+        self.scene.rigid_objects["obstacle2"] = self.obstacle2
+        self.scene.rigid_objects["obstacle3"] = self.obstacle3
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         self.scene.clone_environments(copy_from_source=False)
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -148,13 +152,14 @@ class SafetyEnv(DirectRLEnv):
         q_err_norm = (self.q_goal - q)/self.joint_range[self.arm_ids]
         # q_dist = torch.norm(q_err_norm, dim=-1)
         q_err = torch.norm(q_err_norm, dim=-1)
-        # prev_q_err = torch.norm(self.prev_q_err, dim=-1)
-        # reward_progress = (prev_q_err - q_err) * 10.0
+        prev_q_err = torch.norm(self.prev_q_err, dim=-1)
+        reward_progress = (prev_q_err - q_err) * 2.0
 
         q_abs = torch.abs(q_err_norm)
-        q_worst = torch.max(q_abs, dim=-1)
+        q_worst = torch.max(q_abs, dim=-1).values
         mean_sq = torch.mean(q_abs**2, dim=-1)
         reward_q = torch.exp(-10.0 * mean_sq)
+        penalty_q_worst = 1.0 * q_worst
         # reward_for_joint = 1.0/(1.0 + (q_abs)**2)
         # reward_for_joint = torch.where(q_dist < 0.2, 2.0 * reward_for_joint, reward_for_joint)
         # reward_joint = torch.sum(reward_for_joint, dim=-1)*0.1
@@ -171,7 +176,9 @@ class SafetyEnv(DirectRLEnv):
         penalty_obs = torch.sum(penalty_obs, dim=-1) * 50.0
 
         reward = (reward_q
+                  + reward_progress
                   - penalty_dq
+                  - penalty_q_worst
                   - penalty_action
                   - penalty_obs)
         if self.global_step % 100 == 0:
@@ -180,11 +187,12 @@ class SafetyEnv(DirectRLEnv):
             for i in range(len(self.arm_ids)):
                 self.writer.add_scalar(f"geom/q_err_norm_joint_{i}", q_err_norm[:, i].abs().mean().item(), self.global_step)
             self.writer.add_scalar("reward/reward_joint", reward_q.mean().item(), self.global_step)
-            #self.writer.add_scalar("reward/reward_progress", reward_progress.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/reward_progress", reward_progress.mean().item(), self.global_step)
             self.writer.add_scalar("reward/total", reward.mean().item(), self.global_step)
             self.writer.add_scalar("reward/penalty_dq", penalty_dq.mean().item(), self.global_step)
             self.writer.add_scalar("reward/penalty_action", penalty_action.mean().item(), self.global_step)
             self.writer.add_scalar("reward/penalty_obs", penalty_obs.mean().item(), self.global_step)
+            self.writer.add_scalar("reward/penalty_q_worst", penalty_q_worst.mean().item(), self.global_step)
         self.global_step += 1
         self.prev_q_err.copy_(q_err_norm)
         return reward
@@ -337,7 +345,24 @@ class SafetyEnv(DirectRLEnv):
             min_clearance: (N,)
             clearance:     (N, P)
         """
-        obstacle_pos_w = self.obstacle.data.root_pos_w  # (N, 3)
+        obstacle1_pos_w = self.obstacle1.data.root_pos_w  # (N, 3)
+        obstacle2_pos_w = self.obstacle2.data.root_pos_w
+        obstacle3_pos_w = self.obstacle3.data.root_pos_w
+
+        clearance1 = self.compute_dist_from_obstacle(robot_probes_vec, obstacle1_pos_w)
+        clearance2 = self.compute_dist_from_obstacle(robot_probes_vec, obstacle2_pos_w)
+        clearance3 = self.compute_dist_from_obstacle(robot_probes_vec, obstacle3_pos_w)
+
+        clearance_all = torch.stack([clearance1, clearance2, clearance3], dim=-1)
+
+        clearance = clearance_all.min(dim=1).values
+        min_clearance = clearance.min(dim=-1).values
+
+        return min_clearance, clearance
+
+        
+    
+    def compute_dist_from_obstacle(self, robot_probes_vec : torch.Tensor, obstacle_pos_w : torch.Tensor):
 
         # Cylinder geometry
         cyl_radius = self.cfg.obstacle_radius
@@ -355,11 +380,10 @@ class SafetyEnv(DirectRLEnv):
         # Radial distance in XY from cylinder axis
         dx = px - cx
         dy = py - cy
-        radial_dist = torch.sqrt(dx * dx + dy * dy + 1e-8)  # (N,P)
+        radial_dist = torch.sqrt(dx * dx + dy * dy + 1e-8) # (N,P)
 
         # Signed radial distance from infinite cylinder surface
         radial_out = radial_dist - cyl_radius  # >0 outside, <0 inside projected radius
-
         # Vertical distance from finite cylinder slab [-half_h, +half_h]
         dz = torch.abs(pz - cz) - cyl_half_h   # >0 above/below caps, <0 within height
 
@@ -380,9 +404,7 @@ class SafetyEnv(DirectRLEnv):
 
         # Clearance including link/probe thickness
         clearance = sdf_cylinder - link_radius
-
-        min_clearance = clearance.min(dim=-1).values
-        return min_clearance, clearance
+        return clearance
 
     def quat_conjugate(self, q: torch.Tensor):
         w, x, y, z = q.unbind(-1)

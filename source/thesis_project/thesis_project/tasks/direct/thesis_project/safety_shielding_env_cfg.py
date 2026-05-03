@@ -86,7 +86,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     goal_success_dist = 0.02
     
     action_scale = 0.7
-    dof_velocity_scale = 0.5
+    dof_velocity_scale = 0.3
     action_penalty_scale = 0.02
     joint_reward_scale = 1.0
     lift_reward_scale = 1.25
