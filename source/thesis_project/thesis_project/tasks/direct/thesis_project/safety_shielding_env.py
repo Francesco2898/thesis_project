@@ -66,6 +66,10 @@ class SafetyEnv(DirectRLEnv):
         self.clear_vec_buf = torch.zeros(self.num_envs, 20, device=self.device)
         self.min_dist_buf = torch.zeros(self.num_envs, device=self.device)
 
+        self.obstacle_box_min = torch.tensor([0.1, -0.35, self.cfg.table_height+self.cfg.obstacle_height/2], device=self.device)
+        self.obstacle_box_max = torch.tensor([0.6, 0.35, self.cfg.table_height+self.cfg.obstacle_height/2], device=self.device)
+        self.obs_std_orientation = torch.tensor([1.0, 0.0, 0.0, 0.0], device=self.device)
+
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
         self.table = RigidObject(self.cfg.table_cfg)
@@ -246,6 +250,34 @@ class SafetyEnv(DirectRLEnv):
         self.clear_vec_buf[env_ids] = 0
         self.min_dist_buf[env_ids] = self.cfg.safe_margin
         self.compute_ee_pos()
+
+        obs1_new_pos = sample_uniform(self.obstacle_box_min, self.obstacle_box_max, (len(env_ids), 3), device=self.device)
+        obs1_new_pos = obs1_new_pos + self.scene.env_origins[env_ids]
+        obs2_new_pos = sample_uniform(self.obstacle_box_min, self.obstacle_box_max, (len(env_ids), 3), device=self.device)
+        obs2_new_pos = obs2_new_pos + self.scene.env_origins[env_ids]
+        obs3_new_pos = sample_uniform(self.obstacle_box_min, self.obstacle_box_max, (len(env_ids), 3), device=self.device)
+        obs3_new_pos = obs3_new_pos + self.scene.env_origins[env_ids]
+        obs1_new_state = torch.cat((
+            obs1_new_pos,
+            self.obs_std_orientation.repeat(len(env_ids), 1),
+            torch.zeros((len(env_ids), 3), device=self.device),
+            torch.zeros((len(env_ids), 3), device=self.device),
+        ), dim=-1)
+        obs2_new_state = torch.cat((
+            obs2_new_pos,
+            self.obs_std_orientation.repeat(len(env_ids), 1),
+            torch.zeros((len(env_ids), 3), device=self.device),
+            torch.zeros((len(env_ids), 3), device=self.device),
+        ), dim=-1)
+        obs3_new_state = torch.cat((
+            obs3_new_pos,
+            self.obs_std_orientation.repeat(len(env_ids), 1),
+            torch.zeros((len(env_ids), 3), device=self.device),
+            torch.zeros((len(env_ids), 3), device=self.device),
+        ), dim=-1)
+        self.obstacle1.write_root_state_to_sim(obs1_new_state, env_ids)
+        self.obstacle2.write_root_state_to_sim(obs2_new_state, env_ids)
+        self.obstacle3.write_root_state_to_sim(obs3_new_state, env_ids)
 
 
     # Ausiliary functions
