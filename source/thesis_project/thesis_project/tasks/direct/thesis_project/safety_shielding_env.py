@@ -225,6 +225,11 @@ class SafetyEnv(DirectRLEnv):
         )
         joint_pos = torch.clamp(joint_pos, self.robot_dof_lower_limit, self.robot_dof_upper_limit)
         joint_vel = torch.zeros_like(joint_pos)
+        joint_vel[:, self.arm_ids] = sample_uniform(-0.5,
+                                   0.5,
+                                   (len(env_ids), len(self.arm_ids)),
+                                   device=self.device)
+        joint_vel[:, -2:] = 0.0
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
         self.robot_dof_targets[env_ids] = joint_pos
         self.tau_cmd[env_ids] = 0.0
@@ -387,7 +392,7 @@ class SafetyEnv(DirectRLEnv):
 
         clearance_all = torch.stack([clearance1, clearance2, clearance3], dim=-1)
 
-        clearance = clearance_all.min(dim=1).values
+        clearance = clearance_all.min(dim=-1).values
         min_clearance = clearance.min(dim=-1).values
 
         return min_clearance, clearance

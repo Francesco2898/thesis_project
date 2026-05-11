@@ -78,8 +78,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
-    # q_init = [-0.7103565501999577, 0.29044340028667026, 0.22102578761873362, -0.08273362860618419, -0.17377165533718392, 0.3715945279443849, -0.6604328007789008, 0.0, 0.0]
-    delta_q = 0.125
+    delta_q = 0.5
     safe_eps_dq = 0.08
     K_p = 50.0
     K_d = 0.1

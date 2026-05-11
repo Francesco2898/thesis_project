@@ -13,8 +13,8 @@ from . import agents
 
 
 gym.register(
-    id="Template-Thesis-Project-Direct-v0",
-    entry_point=f"{__name__}.thesis_project_env:ThesisProjectEnv",
+    id="PickPlace_policy_v0",
+    entry_point=f"{__name__}.pick_place_env:ThesisProjectEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.thesis_project_env_cfg:ThesisProjectEnvCfg",
@@ -43,4 +43,14 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.safety_shielding_env_cfg:SafetyEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg_safety:PPORunnerCfg",
     },
+)
+
+gym.register(
+    id="Switching_env",
+    entry_point=f"{__name__}.switching_env:SwitchingEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.switching_env_cfg:SwitchingEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:PPORunnerCfg",
+    }
 )

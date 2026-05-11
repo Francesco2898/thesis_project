@@ -55,8 +55,19 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     #robot(s)
     robot_cfg: ArticulationCfg = FRANKA_PANDA_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     robot_cfg.init_state.pos = (0.0, 0.0, table_height)
-    robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
-    robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
+    # robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
+    # robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
+    robot_cfg.init_state.joint_pos = {
+        "panda_joint1": -0.27689978081008815,
+        "panda_joint2":  -0.5340115896900678,
+        "panda_joint3":  -0.4743214197617522,
+        "panda_joint4": -2.930253809731531,
+        "panda_joint5": -0.35696643262928796,
+        "panda_joint6":  2.413823638632636, 
+        "panda_joint7": 0.3639460666111401,
+        "panda_finger_joint1": 0.04,
+        "panda_finger_joint2": 0.04,
+    }
     #scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4, replicate_physics=True)
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",

@@ -13,7 +13,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 128
     max_iterations = 1750
     save_interval = 100
-    experiment_name = "franka_pick_place_direct"
+    experiment_name = "franka_pick_place"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.8, # 1 default

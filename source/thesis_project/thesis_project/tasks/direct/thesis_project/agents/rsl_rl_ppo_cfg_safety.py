@@ -13,7 +13,7 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 32
     max_iterations = 1000
     save_interval = 100
-    experiment_name = "franka_backup_policy_noisy"
+    experiment_name = "franka_backup_policy"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=0.5, # 1 default
