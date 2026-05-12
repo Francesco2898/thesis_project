@@ -20,7 +20,7 @@ parser.add_argument("--real-time", action="store_true", default=False, help="Run
 parser.add_argument("--task_policy_path", type=str, required=True, help="Path to exported main task policy.pt.")
 parser.add_argument("--safety_policy_path", type=str, required=True, help="Path to exported safety policy.pt.")
 # switching thresholds
-parser.add_argument("--d_enter", type=float, default=0.08, help="Clearance threshold to enter safety mode.")
+parser.add_argument("--d_enter", type=float, default=0.06, help="Clearance threshold to enter safety mode.")
 parser.add_argument("--d_exit", type=float, default=0.12, help="Clearance threshold to exit safety mode.")
 parser.add_argument("--q_threshold", type=float, default=0.15, help="Safe-goal error threshold to exit safety mode.")
 
@@ -128,6 +128,9 @@ def main(
             obs_task = base_env.get_task_obs_for_inference()
 
             # Safety switch condition
+            base_env.compute_intermediate_values()
+            base_env.probes_w_buf = base_env.compute_probe_points_pos()
+            base_env.min_dist_buf, base_env.clear_vec_buf = base_env.compute_min_obstacle_distance(base_env.probes_w_buf)
             min_clearance = base_env.min_dist_buf
 
             q = base_env.robot.data.joint_pos[:, base_env.arm_ids]
@@ -138,7 +141,7 @@ def main(
             enter_safe = (mode == 0) & (min_clearance < args_cli.d_enter)
             if enter_safe.any():
                 # base_env.q_goal[enter_safe] = base_env.q_safe_buff[enter_safe].clone()
-                base_env.robot_dof_targets[enter_safe, :-2] = base_env.robot.data.joint_pos[enter_safe, :-2]
+                # base_env.robot_dof_targets[enter_safe, :-2] = base_env.robot.data.joint_pos[enter_safe, :-2]
                 mode[enter_safe] = 1
 
             obs_safe = base_env.get_safety_obs_for_inference()

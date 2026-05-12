@@ -23,4 +23,4 @@ class SwitchingEnvCfg(ThesisProjectEnvCfg):
 
     safety_dof_velocity_scale = 0.3
     safety_clearance_scale = 0.2
-    action_scale = 0.35
+    action_scale_arm = 0.25

@@ -133,3 +133,48 @@ Some examples of packages that can likely be excluded are:
 "<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
 ...
 ```
+
+## Training and playing the policies
+
+This repository contains Isaac Lab environments for a Franka Panda pick-and-place task and a safety/backup policy.
+The tasks are divided in cfg file and env file: 
+- thesis_project_env_cfg is used to set up the thesis_project_env, pick_place_env
+- safety_shielding_env_cfg is used for safety_shielding_env and safety_shielding_env_cfg
+In the cfg file are defined the main components of the scene and the main parameters
+The environments are registered as Gymnasium tasks and can be listed with:
+
+```bash
+python scripts/list_envs.py
+
+PickPlace_policy_v0      # Main pick-and-place task
+BackUp_policy_v0         # Safety / backup policy task
+BackUp_policy_noisy
+Switching_env      # Evaluation environment with policy switching
+source/thesis_project/thesis_project/tasks/.../__init__.py
+
+## Training:
+python scripts/rsl_rl/train.py --task=task_name
+
+##To run the switching simulation
+
+python scripts/rsl_rl/simulation_policy_switch.py \
+    --task=Switching_env \
+    --num_envs=1 \
+    --task_policy_path=path_to/policy.pt \
+    --safety_policy_path= path_to/policy.pt \
+    
+## These parameters could be modified:
+
+--d_enter       Clearance threshold for entering safety mode.
+--d_exit        Clearance threshold for leaving safety mode.
+--q_threshold   Joint-space error threshold for leaving safety mode.
+
+## example:
+python scripts/rsl_rl/simulation_policy_switch.py \
+    --task=Switching_env \
+    --num_envs=1 \
+    --task_policy_path=logs/rsl_rl/pick_place_run/exported/policy.pt \
+    --safety_policy_path=logs/rsl_rl/backup_run/exported/policy.pt \
+    --d_enter=0.12 \
+    --d_exit=0.20 \
+    --q_threshold=0.08

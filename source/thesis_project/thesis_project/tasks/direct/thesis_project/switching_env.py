@@ -58,7 +58,7 @@ class SwitchingEnv(ThesisProjectEnv):
                        + self.robot_dof_speed_scales[self.arm_ids]
                        * self.dt
                        * arm_actions
-                       * self.cfg.action_scale)
+                       * self.cfg.action_scale_arm)
         
         self.robot_dof_targets[:, self.arm_ids] = torch.clamp(targets_arm,
                                                               self.robot_dof_lower_limit[self.arm_ids],
