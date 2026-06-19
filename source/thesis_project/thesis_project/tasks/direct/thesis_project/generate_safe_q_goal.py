@@ -25,7 +25,7 @@ def main():
         0.04,
     ])
 
-    target_pos = np.array([0.5, 0.35, 0.25])
+    target_pos = np.array([0.4, -0.05, 0.25])
     target_rot = pin.rpy.rpyToMatrix(np.pi, 0.0, 0.0)
     oMdes = pin.SE3(target_rot, target_pos)
 
@@ -65,7 +65,7 @@ def main():
 
     final_pos_pin = data.oMf[ee_frame_id].translation
 
-    robot_base_pos_w = np.array([0.0, 0.0, 0.75])
+    robot_base_pos_w = np.array([0.0, -0.25, 0.75])
     final_pos_isaac_expected = robot_base_pos_w + final_pos_pin
 
     print("\nTarget pos Pinocchio:")

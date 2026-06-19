@@ -10,19 +10,19 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 
 @configclass
 class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    num_steps_per_env = 128
-    max_iterations = 1750
+    num_steps_per_env = 256
+    max_iterations = 2500
     save_interval = 100
     experiment_name = "franka_pick_place"
     empirical_normalization = True
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8, # 1 default
-        actor_hidden_dims=[128, 64],
-        critic_hidden_dims=[128, 64],
+        init_noise_std=1.0, # 1 default
+        actor_hidden_dims=[256, 128, 64],
+        critic_hidden_dims=[256, 128, 64],
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
-        value_loss_coef=1.0,
+        value_loss_coef=0.6,
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.001,

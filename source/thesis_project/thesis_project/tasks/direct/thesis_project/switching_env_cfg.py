@@ -6,7 +6,7 @@ from .thesis_project_env_cfg import ThesisProjectEnvCfg
 @configclass
 class SwitchingEnvCfg(ThesisProjectEnvCfg):
     # - space definition
-    action_space = 9
+    action_space = 7
     observation_space = 46
     state_space = 0
     

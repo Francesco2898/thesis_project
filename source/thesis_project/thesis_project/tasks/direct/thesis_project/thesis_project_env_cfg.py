@@ -21,7 +21,7 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10
     # - space definition
-    action_space = 9
+    action_space = 7
     observation_space = 46
     state_space = 0
     # simulation
@@ -40,7 +40,7 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     table_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Table",
         spawn=sim_utils.CuboidCfg(
-            size=(1.0, 0.8, table_height),  # piano 1.0 x 0.8, spessore 5cm
+            size=(1.0, 1.5, table_height),  # piano 1.0 x 0.8, spessore 5cm
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
@@ -58,18 +58,18 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     # robot_cfg.init_state.joint_pos["panda_joint4"] = -2.350
     # robot_cfg.init_state.joint_pos["panda_joint6"] = 2.500
     robot_cfg.init_state.joint_pos = {
-        "panda_joint1": -0.27689978081008815,
-        "panda_joint2":  -0.5340115896900678,
-        "panda_joint3":  -0.4743214197617522,
-        "panda_joint4": -2.930253809731531,
-        "panda_joint5": -0.35696643262928796,
-        "panda_joint6":  2.413823638632636, 
-        "panda_joint7": 0.3639460666111401,
+        "panda_joint1": -0.029044051651372763,
+        "panda_joint2":  -0.07600285998172703,
+        "panda_joint3":  -0.09808932888281359,
+        "panda_joint4": -2.7164732486830205,
+        "panda_joint5": -0.015479267231388113,
+        "panda_joint6":  2.6408228678092764, 
+        "panda_joint7": 0.6721272535345035,
         "panda_finger_joint1": 0.04,
         "panda_finger_joint2": 0.04,
     }
     #scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=128, env_spacing=4, replicate_physics=True)
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
@@ -81,13 +81,13 @@ class ThesisProjectEnvCfg(DirectRLEnvCfg):
     K_d = 0.1
     goal_success_dist = 0.02
     
-    action_scale = 0.7
+    action_scale = 0.25
     dof_velocity_scale = 0.1
-    action_penalty_scale = 0.02
+    action_penalty_scale = 0.05
     rot_reward_scale = 1.0
     lift_reward_scale = 1.25
     grasp_reward_scale = 3.0
     goal_reward_scale = 2.5
     success_reward_scale = 3.0
-    obstacle_penalty_scale = 5.0
+    obstacle_penalty_scale = 7.0
     sh_activ_penalty = 0.0 #3.0 con policy principale

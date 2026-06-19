@@ -53,7 +53,7 @@ class SwitchingEnv(ThesisProjectEnv):
         # self.saving_q_safe(self.min_dist_buf)
 
         # Arm actions
-        arm_actions = self.actions[:, :-2]
+        arm_actions = self.actions
         targets_arm = (self.robot_dof_targets[:, self.arm_ids]
                        + self.robot_dof_speed_scales[self.arm_ids]
                        * self.dt
@@ -65,8 +65,8 @@ class SwitchingEnv(ThesisProjectEnv):
                                                               self.robot_dof_upper_limit[self.arm_ids])
 
         # Fingers actions
-        gripper_cmd = self.actions[:, -2:-1].clamp(-1.0, 1.0)
-        gripper_cmd = gripper_cmd.expand(-1, 2)
+        # gripper_cmd = self.actions[:, -2:-1].clamp(-1.0, 1.0)
+        # gripper_cmd = gripper_cmd.expand(-1, 2)
         OPEN = 1.0
         CLOSE = -1.0
 
@@ -86,15 +86,16 @@ class SwitchingEnv(ThesisProjectEnv):
         gs = torch.where(open_gripper, torch.ones_like(gs), gs)
         self.gripper_state = gs
 
-        cmd = torch.where(self.gripper_state.unsqueeze(-1) > 0.5,
-                          torch.full_like(gripper_cmd, OPEN),
-                          torch.full_like(gripper_cmd, CLOSE))
+        cmd = torch.where(self.gripper_state > 0.5,
+                          torch.full_like(self.gripper_state, OPEN),
+                          torch.full_like(self.gripper_state, CLOSE))
+        cmd = cmd.unsqueeze(-1).expand(-1, 2)
         
         targets_gripper = (self.robot_dof_targets[:, self.finger_joints_ids]
                            + self.robot_dof_speed_scales[self.finger_joints_ids]
                            * self.dt
                            * cmd
-                           * self.cfg.action_scale)
+                           * 0.8)
         
         self.robot_dof_targets[:, self.finger_joints_ids] = torch.clamp(targets_gripper,
                                                                      self.robot_dof_lower_limit[self.finger_joints_ids],

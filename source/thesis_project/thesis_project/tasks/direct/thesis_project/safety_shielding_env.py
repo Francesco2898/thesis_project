@@ -51,6 +51,7 @@ class SafetyEnv(DirectRLEnv):
         self.frame_link_2_idx = self.robot.find_bodies("panda_link2")[0][0]
         self.frame_link_4_idx = self.robot.find_bodies("panda_link4")[0][0]
         self.frame_link_6_idx = self.robot.find_bodies("panda_link6")[0][0]
+        self.gripper_body_idx = self.robot.find_bodies("panda_hand")[0][0]
         self.frame_link_ids   = torch.tensor(
             [self.frame_link_2_idx, self.frame_link_4_idx, self.frame_link_6_idx, self.hand_link_idx],
             device=self.device, dtype=torch.long
@@ -93,6 +94,17 @@ class SafetyEnv(DirectRLEnv):
                 ),
                 debug_vis=True
             )
+        probe_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/Visuals/probe_points",
+            markers={
+                "sphere": sim_utils.SphereCfg(
+                    radius=self.cfg.link_radius,
+                    visual_material=sim_utils.PreviewSurfaceCfg(
+                        diffuse_color=(1.0, 1.0, 0.0)  # giallo
+                    ),
+                )
+            },
+        )
         self.obstacle1 = RigidObject(obstacle_cfg("Obstacle1", (0.4, 0.0, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
         self.obstacle2 = RigidObject(obstacle_cfg("Obstacle2", (0.6, -0.25, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
         self.obstacle3 = RigidObject(obstacle_cfg("Obstacle3", (0.6, 0.25, self.cfg.table_height + 0.5*self.cfg.obstacle_height)))
@@ -102,6 +114,7 @@ class SafetyEnv(DirectRLEnv):
         self.scene.rigid_objects["obstacle1"] = self.obstacle1
         self.scene.rigid_objects["obstacle2"] = self.obstacle2
         self.scene.rigid_objects["obstacle3"] = self.obstacle3
+        self.probe_marker = VisualizationMarkers(probe_marker_cfg)
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         self.scene.clone_environments(copy_from_source=False)
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
@@ -308,6 +321,66 @@ class SafetyEnv(DirectRLEnv):
 
 
 
+    # def compute_probe_points_pos(self, joints_link_ids: torch.Tensor | None = None):
+    #     if joints_link_ids is None:
+    #         joints_link_ids = self.frame_link_ids
+
+    #     p2 = self.robot.data.body_pos_w[:, self.frame_link_2_idx]
+    #     p4 = self.robot.data.body_pos_w[:, self.frame_link_4_idx]
+    #     p6 = self.robot.data.body_pos_w[:, self.frame_link_6_idx]
+    #     p7 = self.robot.data.body_pos_w[:, self.hand_link_idx]
+    #     pg = self.robot_grasp_pos
+
+    #     def lerp_points(p1: torch.Tensor, p2: torch.Tensor, ts: list[float]) -> torch.Tensor:
+    #         p1 = p1.unsqueeze(1)
+    #         p2 = p2.unsqueeze(1)
+    #         t  = torch.tensor(ts, device=self.device, dtype=p1.dtype).view(1, -1, 1)
+    #         return (1.0 - t)*p1 + t*p2
+        
+    #     seg_24 = lerp_points(p2, p4, [0.25, 0.5, 0.75])
+    #     seg_46 = lerp_points(p4, p6, [0.25, 0.5, 0.75])
+    #     seg_67 = lerp_points(p6, p7, [0.33, 0.66])
+
+    #     sx, sy, sz = 0.04, 0.04, 0.03
+    #     tip = 0.22
+
+    #     hand_offsets_local = torch.tensor(
+    #         [
+    #             [ +sx, 0.0, 0.0],
+    #             [ -sx, 0.0, 0.0],
+    #             [ 0.0, +sy, 0.0],
+    #             [ 0.0, -sy, 0.0],
+    #             [ 0.0, 0.0, +sz],
+    #             [ 0.0, 0.0, -sz],
+    #             [ 0.0, 0.0, +tip],  # extra forward tip
+    #         ],
+    #         device=self.device,
+    #         dtype=p7.dtype,
+    #     )  # (7,3)
+
+    #     hand_quat = self.robot.data.body_quat_w[:, self.hand_link_idx]  # (N,4) [w,x,y,z] in IsaacLab
+    #     hand_quat = hand_quat / (hand_quat.norm(dim=-1, keepdim=True) + 1e-8)
+
+    #     # rotate offsets to world: (N,7,3)
+    #     offs = hand_offsets_local.unsqueeze(0).expand(self.num_envs, -1, -1)
+    #     offs_w = self.rotate_vec_by_quat(offs, hand_quat.unsqueeze(1).expand(-1, offs.shape[1], -1))
+    #     hand_pts = p7.unsqueeze(1) + offs_w  # (N,7,3)
+
+    #     # ---- stack everything into (N,20,3) ----
+
+    #     anchors = torch.stack([p2, p4, p6, p7, pg], dim=1)
+
+    #     probes_w = torch.cat(
+    #         [
+    #             anchors,        # (N,5,3)
+    #             seg_24,         # (N,3,3)
+    #             seg_46,         # (N,3,3)
+    #             seg_67,         # (N,2,3)
+    #             hand_pts,       # (N,7,3)
+    #         ],
+    #         dim=1,
+    #     )
+    #     return probes_w
     def compute_probe_points_pos(self, joints_link_ids: torch.Tensor | None = None):
         if joints_link_ids is None:
             joints_link_ids = self.frame_link_ids
@@ -324,12 +397,12 @@ class SafetyEnv(DirectRLEnv):
             t  = torch.tensor(ts, device=self.device, dtype=p1.dtype).view(1, -1, 1)
             return (1.0 - t)*p1 + t*p2
         
-        seg_24 = lerp_points(p2, p4, [0.25, 0.5, 0.75])
-        seg_46 = lerp_points(p4, p6, [0.25, 0.5, 0.75])
+        seg_24 = lerp_points(p2, p4, [0.25, 0.75])
+        seg_46 = lerp_points(p4, p6, [0.25, 0.75])
         seg_67 = lerp_points(p6, p7, [0.33, 0.66])
 
         sx, sy, sz = 0.04, 0.04, 0.03
-        tip = 0.22
+        tip = 0.21
 
         hand_offsets_local = torch.tensor(
             [
@@ -352,6 +425,31 @@ class SafetyEnv(DirectRLEnv):
         offs = hand_offsets_local.unsqueeze(0).expand(self.num_envs, -1, -1)
         offs_w = self.rotate_vec_by_quat(offs, hand_quat.unsqueeze(1).expand(-1, offs.shape[1], -1))
         hand_pts = p7.unsqueeze(1) + offs_w  # (N,7,3)
+        # Two fixed side probe points on the gripper body
+        pg_body = self.robot.data.body_pos_w[:, self.gripper_body_idx]
+        qg_body = self.robot.data.body_quat_w[:, self.gripper_body_idx]
+        qg_body = qg_body / (qg_body.norm(dim=-1, keepdim=True) + 1e-8)
+        side_y = 0.05      # left/right distance from gripper center
+        side_x = 0.000      # vertical/local offset
+        side_z = 0.085      # forward offset from panda_link7 toward the gripper body
+
+        gripper_side_offsets_local = torch.tensor(
+            [
+                [ side_x, side_y, side_z],
+                [ side_x, -side_y, side_z],
+            ],
+            device=self.device,
+            dtype=p7.dtype,
+        )  # (2, 3)
+
+        side_offs = gripper_side_offsets_local.unsqueeze(0).expand(self.num_envs, -1, -1)
+
+        side_offs_w = self.rotate_vec_by_quat(
+            side_offs,
+            qg_body.unsqueeze(1).expand(-1, side_offs.shape[1], -1)
+        )
+
+        gripper_side_pts = pg_body.unsqueeze(1) + side_offs_w  # (N,2,3)
 
         # ---- stack everything into (N,20,3) ----
 
@@ -364,9 +462,14 @@ class SafetyEnv(DirectRLEnv):
                 seg_46,         # (N,3,3)
                 seg_67,         # (N,2,3)
                 hand_pts,       # (N,7,3)
+                gripper_side_pts
             ],
             dim=1,
         )
+        probe_points_flat = probes_w.reshape(-1, 3)
+        # self.probe_marker.visualize(probe_points_flat.detach().cpu())
+        #self.tip_marker.visualize(hand_pts[:, -1, :].detach().cpu())
+        self.hand_tip_z = hand_pts[:, -1, -1]
         return probes_w
     
     

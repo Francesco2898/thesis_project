@@ -46,7 +46,7 @@ class SafetyEnvCfg(DirectRLEnvCfg):
     table_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Table",
         spawn=sim_utils.CuboidCfg(
-            size=(1.0, 0.8, table_height),  # piano 1.0 x 0.8, spessore 5cm
+            size=(1.0, 1.5, table_height),  # piano 1.0 x 0.8, spessore 5cm
             rigid_props=sim_utils.RigidBodyPropertiesCfg(disable_gravity=False),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             mass_props=sim_utils.MassPropertiesCfg(mass=1000.0),
@@ -74,11 +74,11 @@ class SafetyEnvCfg(DirectRLEnvCfg):
         "panda_finger_joint1": 0.04,
         "panda_finger_joint2": 0.04,
     }
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=64, env_spacing=4, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=4, replicate_physics=True)
     dof_names = ["panda_joint1","panda_joint2","panda_joint3","panda_joint4","panda_joint5","panda_joint6","panda_joint7",
                  "panda_finger_joint1", "panda_finger_joint2"]
     
-    delta_q = 0.5
+    delta_q = 0.2
     safe_eps_dq = 0.08
     K_p = 50.0
     K_d = 0.1
