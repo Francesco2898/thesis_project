@@ -146,28 +146,29 @@ The environments are registered as Gymnasium tasks and can be listed with:
 ```bash
 python scripts/list_envs.py
 
+## List of trainable environments (defined in __init__.py)
 PickPlace_policy_v0      # Main pick-and-place task
 BackUp_policy_v0         # Safety / backup policy task
-BackUp_policy_noisy
-Switching_env      # Evaluation environment with policy switching
+Switching_env            # Evaluation environment with policy switching
 source/thesis_project/thesis_project/tasks/.../__init__.py
 
 ## Training:
 python scripts/rsl_rl/train.py --task=task_name
 
 ##To run the switching simulation
-
 python scripts/rsl_rl/simulation_policy_switch.py \
     --task=Switching_env \
-    --num_envs=1 \
+    --num_envs=int \
     --task_policy_path=path_to/policy.pt \
-    --safety_policy_path= path_to/policy.pt \
+    --safety_policy_path=path_to/policy.pt \
+    --eval_mode=nominal\
     
 ## These parameters could be modified:
-
 --d_enter       Clearance threshold for entering safety mode.
 --d_exit        Clearance threshold for leaving safety mode.
 --q_threshold   Joint-space error threshold for leaving safety mode.
+--num_envs      Number of environment rendered
+--eval_mode     Mode selector 'nominal'=no shielding, 'switch' = shielding
 
 ## example:
 python scripts/rsl_rl/simulation_policy_switch.py \
@@ -175,6 +176,7 @@ python scripts/rsl_rl/simulation_policy_switch.py \
     --num_envs=1 \
     --task_policy_path=logs/rsl_rl/pick_place_run/exported/policy.pt \
     --safety_policy_path=logs/rsl_rl/backup_run/exported/policy.pt \
-    --d_enter=0.12 \
-    --d_exit=0.20 \
-    --q_threshold=0.08
+    --d_enter=0.06 \
+    --d_exit=0.08 \
+    --q_threshold=0.1\
+    --eval_mode=nominal
